@@ -114,7 +114,7 @@ fn calculate_new_mapping(
         let master_partition_index = partition % vec.len();
         for replica in 0..replication_factor {
             let index = calc_replica_index(vec.len(), master_partition_index, replica);
-            let id = vec.get(index).unwrap();
+            let id = vec.get(index).expect("guaranteed by calc_replica_index implementation");
             let partition_id = PartitionId(partition as u16);
             if replica == 0 {
                 new_mapping.insert(
