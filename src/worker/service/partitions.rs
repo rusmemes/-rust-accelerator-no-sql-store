@@ -7,6 +7,8 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+const SYNC_TIMEOUT_MS: u64 = 60000;
+
 pub fn handle_sync_batch_response(
     state: &mut State,
     partition_id_to_max_applied_key: HashMap<PartitionId, Key>,
@@ -34,137 +36,220 @@ pub fn sync_partitions(
     runtime_store: &RuntimeStore,
     me: &Me,
 ) {
-    let partitions_last_update_time = state.partitions_last_update_time;
     let currently_synced_nodes = state.get_currently_synced_actual_nodes();
 
     for partition_id in 0..PARTITIONS_AMOUNT {
         let partition_id = PartitionId(partition_id as u16);
-        if !runtime_store
+        if runtime_store
             .get_partition_records(&partition_id, 1, None)
             .is_empty()
         {
-            let recipient_ids: HashSet<&NodeId> =
-                get_node_ids_curr_node_has_to_sync_the_partition_to(
-                    partition_id,
-                    &me.id,
-                    &state.partitions,
-                    &state.nodes,
-                    currently_synced_nodes.get(&partition_id),
-                );
+            continue;
+        }
 
-            if let Some(recipient_id_to_last_state) = state.sync.get_mut(&partition_id) {
-                for recipient_id in recipient_ids {
-                    if !state.nodes.contains_key(recipient_id) {
-                        recipient_id_to_last_state.remove(recipient_id);
-                    } else if let Some(SyncState {
-                        prev_max_key,
-                        curr_max_key,
-                        confirmed,
-                        last_start_time,
-                    }) = recipient_id_to_last_state.get_mut(recipient_id)
-                    {
-                        const SYNC_TIMEOUT_MS: u64 = 60000;
-                        if *confirmed {
-                            if let Some(new_max_key) = sync_batch(
-                                output,
-                                runtime_store,
-                                recipient_id,
-                                &partition_id,
-                                Some(curr_max_key),
-                                me,
-                            ) {
-                                *prev_max_key = Some(*curr_max_key);
-                                *curr_max_key = new_max_key;
-                                *confirmed = false;
-                                *last_start_time = now_millis();
-                            } else {
-                                let curr_node_is_in_mapping = state
-                                    .partitions
-                                    .mapping
-                                    .get(&partition_id)
-                                    .map_or(false, |mapping| {
-                                        mapping.master == me.id || mapping.replicas.contains(&me.id)
-                                    });
+        let recipient_ids = get_node_ids_curr_node_has_to_sync_the_partition_to(
+            partition_id,
+            &me.id,
+            &state.partitions,
+            &state.nodes,
+            currently_synced_nodes.get(&partition_id),
+        )
+        .into_iter()
+        .cloned()
+        .collect();
 
-                                if curr_node_is_in_mapping {
-                                    state
-                                        .actual_nodes_sync_completion
-                                        .entry(partition_id.clone())
-                                        .or_insert_with(HashMap::new)
-                                        .insert(recipient_id.clone(), partitions_last_update_time);
-                                }
+        sync_partition(
+            state,
+            output,
+            runtime_store,
+            me,
+            partition_id,
+            recipient_ids,
+        );
+    }
 
-                                if let Some(leader_id) = state.elected_leader_id.as_ref() {
-                                    output.push(WorkerProtocol::RemovePartitionFromReplica {
-                                        id: leader_id.clone(),
-                                        replica_id: me.id.clone(),
-                                        partition_id: partition_id.clone(),
-                                    });
-                                }
+    remove_completed_syncs_and_obsolete_partitions(state, runtime_store, me);
+}
 
-                                *confirmed = true;
-                            }
-                        } else if now_millis() - *last_start_time >= SYNC_TIMEOUT_MS {
-                            if let Some(new_max_key) = sync_batch(
-                                output,
-                                runtime_store,
-                                recipient_id,
-                                &partition_id,
-                                prev_max_key.as_ref(),
-                                me,
-                            ) {
-                                *curr_max_key = new_max_key;
-                                *confirmed = false;
-                                *last_start_time = now_millis();
-                            }
-                        }
-                    } else {
-                        if let Some(new_max_key) =
-                            sync_batch(output, runtime_store, recipient_id, &partition_id, None, me)
-                        {
-                            recipient_id_to_last_state.insert(
-                                recipient_id.clone(),
-                                SyncState {
-                                    prev_max_key: None,
-                                    curr_max_key: new_max_key,
-                                    confirmed: false,
-                                    last_start_time: now_millis(),
-                                },
-                            );
-                        }
-                    }
-                }
-                recipient_id_to_last_state.retain(|_, state| !state.confirmed);
-            } else {
-                for recipient_id in recipient_ids {
-                    if let Some(new_max_key) =
-                        sync_batch(output, runtime_store, recipient_id, &partition_id, None, me)
-                    {
-                        let recipient_id_to_last_state =
-                            state.sync.entry(partition_id.clone()).or_default();
-                        recipient_id_to_last_state.insert(
-                            recipient_id.clone(),
-                            SyncState {
-                                prev_max_key: None,
-                                curr_max_key: new_max_key,
-                                confirmed: false,
-                                last_start_time: now_millis(),
-                            },
-                        );
-                    }
-                }
-            }
+fn sync_partition(
+    state: &mut State,
+    output: &mut Vec<WorkerProtocol>,
+    runtime_store: &RuntimeStore,
+    me: &Me,
+    partition_id: PartitionId,
+    recipient_ids: HashSet<NodeId>,
+) {
+    for recipient_id in recipient_ids {
+        let completed = sync_partition_to_recipient(
+            state.sync.entry(partition_id).or_default(),
+            output,
+            runtime_store,
+            me,
+            partition_id,
+            &recipient_id,
+        );
+
+        if completed {
+            record_completed_sync(state, output, me, partition_id, recipient_id);
         }
     }
+
+    if let Some(recipient_states) = state.sync.get_mut(&partition_id) {
+        recipient_states.retain(|_, sync_state| !sync_state.confirmed);
+    }
+}
+
+fn sync_partition_to_recipient(
+    recipient_states: &mut HashMap<NodeId, SyncState>,
+    output: &mut Vec<WorkerProtocol>,
+    runtime_store: &RuntimeStore,
+    me: &Me,
+    partition_id: PartitionId,
+    recipient_id: &NodeId,
+) -> bool {
+    let Some(sync_state) = recipient_states.get_mut(recipient_id) else {
+        start_sync(
+            recipient_states,
+            output,
+            runtime_store,
+            me,
+            partition_id,
+            recipient_id,
+        );
+        return false;
+    };
+
+    if sync_state.confirmed {
+        return continue_confirmed_sync(
+            sync_state,
+            output,
+            runtime_store,
+            me,
+            partition_id,
+            recipient_id,
+        );
+    }
+
+    retry_timed_out_sync(
+        sync_state,
+        output,
+        runtime_store,
+        me,
+        partition_id,
+        recipient_id,
+    );
+    false
+}
+
+fn start_sync(
+    recipient_states: &mut HashMap<NodeId, SyncState>,
+    output: &mut Vec<WorkerProtocol>,
+    runtime_store: &RuntimeStore,
+    me: &Me,
+    partition_id: PartitionId,
+    recipient_id: &NodeId,
+) {
+    if let Some(curr_max_key) =
+        sync_batch(output, runtime_store, recipient_id, &partition_id, None, me)
+    {
+        recipient_states.insert(
+            recipient_id.clone(),
+            SyncState {
+                prev_max_key: None,
+                curr_max_key,
+                confirmed: false,
+                last_start_time: now_millis(),
+            },
+        );
+    }
+}
+
+fn continue_confirmed_sync(
+    sync_state: &mut SyncState,
+    output: &mut Vec<WorkerProtocol>,
+    runtime_store: &RuntimeStore,
+    me: &Me,
+    partition_id: PartitionId,
+    recipient_id: &NodeId,
+) -> bool {
+    if let Some(new_max_key) = sync_batch(
+        output,
+        runtime_store,
+        recipient_id,
+        &partition_id,
+        Some(&sync_state.curr_max_key),
+        me,
+    ) {
+        sync_state.prev_max_key = Some(sync_state.curr_max_key);
+        sync_state.curr_max_key = new_max_key;
+        sync_state.confirmed = false;
+        sync_state.last_start_time = now_millis();
+        false
+    } else {
+        sync_state.confirmed = true;
+        true
+    }
+}
+
+fn retry_timed_out_sync(
+    sync_state: &mut SyncState,
+    output: &mut Vec<WorkerProtocol>,
+    runtime_store: &RuntimeStore,
+    me: &Me,
+    partition_id: PartitionId,
+    recipient_id: &NodeId,
+) {
+    if now_millis() - sync_state.last_start_time < SYNC_TIMEOUT_MS {
+        return;
+    }
+
+    if let Some(new_max_key) = sync_batch(
+        output,
+        runtime_store,
+        recipient_id,
+        &partition_id,
+        sync_state.prev_max_key.as_ref(),
+        me,
+    ) {
+        sync_state.curr_max_key = new_max_key;
+        sync_state.confirmed = false;
+        sync_state.last_start_time = now_millis();
+    }
+}
+
+fn record_completed_sync(
+    state: &mut State,
+    output: &mut Vec<WorkerProtocol>,
+    me: &Me,
+    partition_id: PartitionId,
+    recipient_id: NodeId,
+) {
+    if node_owns_partition(&state.partitions, partition_id, &me.id) {
+        state
+            .actual_nodes_sync_completion
+            .entry(partition_id)
+            .or_default()
+            .insert(recipient_id, state.partitions_last_update_time);
+    }
+
+    if let Some(leader_id) = state.elected_leader_id.as_ref() {
+        output.push(WorkerProtocol::RemovePartitionFromReplica {
+            id: leader_id.clone(),
+            replica_id: me.id.clone(),
+            partition_id,
+        });
+    }
+}
+
+fn remove_completed_syncs_and_obsolete_partitions(
+    state: &mut State,
+    runtime_store: &RuntimeStore,
+    me: &Me,
+) {
     let partitions = &state.partitions;
     state.sync.retain(|partition_id, sync_state| {
         if sync_state.is_empty() {
-            let curr_node_is_in_mapping =
-                partitions.mapping.get(partition_id).is_some_and(|mapping| {
-                    mapping.master == me.id || mapping.replicas.contains(&me.id)
-                });
-
-            if !curr_node_is_in_mapping {
+            if !node_owns_partition(partitions, *partition_id, &me.id) {
                 runtime_store.remove_partition(partition_id);
             }
             false
@@ -172,6 +257,17 @@ pub fn sync_partitions(
             true
         }
     });
+}
+
+fn node_owns_partition(
+    partitions: &Partitions,
+    partition_id: PartitionId,
+    node_id: &NodeId,
+) -> bool {
+    partitions
+        .mapping
+        .get(&partition_id)
+        .is_some_and(|mapping| &mapping.master == node_id || mapping.replicas.contains(node_id))
 }
 
 fn sync_batch(
