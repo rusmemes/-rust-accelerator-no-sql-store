@@ -1,4 +1,4 @@
-use crate::common::{ClusterNode, Me, Node, NodeId, NodeType, Partitions};
+use crate::common::{ClusterNode, Me, Node, NodeId, NodeType, Partitions, now_millis};
 use crate::worker::domain::WorkerProtocol;
 use crate::worker::service::state::State;
 
@@ -21,6 +21,10 @@ pub(super) fn handle_cluster_state(
     };
 
     if accept {
+        if state.partitions != partitions {
+            state.partitions_last_update_time =
+                now_millis().max(state.partitions_last_update_time.saturating_add(1));
+        }
         state.partitions = partitions;
 
         for item in items {

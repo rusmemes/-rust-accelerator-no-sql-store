@@ -67,6 +67,10 @@ impl RuntimeStore {
         }
     }
 
+    pub fn remove_partition(&self, partition: &PartitionId) {
+        self.cache.remove(&partition);
+    }
+
     pub fn delete(&self, key: Key) {
         let partition = key.partition();
         let removed = if let Some(map) = self.cache.get(&partition) {
