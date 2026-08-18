@@ -34,6 +34,9 @@ pub fn sync_partitions(
     runtime_store: &RuntimeStore,
     me: &Me,
 ) {
+    let partitions_last_update_time = state.partitions_last_update_time;
+    let currently_synced_nodes = state.get_currently_synced_actual_nodes();
+
     for partition_id in 0..PARTITIONS_AMOUNT {
         let partition_id = PartitionId(partition_id as u16);
         if !runtime_store
@@ -46,6 +49,7 @@ pub fn sync_partitions(
                     &me.id,
                     &state.partitions,
                     &state.nodes,
+                    currently_synced_nodes.get(&partition_id),
                 );
 
             if let Some(recipient_id_to_last_state) = state.sync.get_mut(&partition_id) {
@@ -74,7 +78,22 @@ pub fn sync_partitions(
                                 *confirmed = false;
                                 *last_start_time = now_millis();
                             } else {
-                                // todo: avoid removing if the sync was from existing actual node to a new one
+                                let curr_node_is_in_mapping = state
+                                    .partitions
+                                    .mapping
+                                    .get(&partition_id)
+                                    .map_or(false, |mapping| {
+                                        mapping.master == me.id || mapping.replicas.contains(&me.id)
+                                    });
+
+                                if curr_node_is_in_mapping {
+                                    state
+                                        .actual_nodes_sync_completion
+                                        .entry(partition_id.clone())
+                                        .or_insert_with(HashMap::new)
+                                        .insert(recipient_id.clone(), partitions_last_update_time);
+                                }
+
                                 if let Some(leader_id) = state.elected_leader_id.as_ref() {
                                     output.push(WorkerProtocol::RemovePartitionFromReplica {
                                         id: leader_id.clone(),
@@ -82,6 +101,8 @@ pub fn sync_partitions(
                                         partition_id: partition_id.clone(),
                                     });
                                 }
+
+                                *confirmed = true;
                             }
                         } else if now_millis() - *last_start_time >= SYNC_TIMEOUT_MS {
                             if let Some(new_max_key) = sync_batch(
@@ -113,8 +134,6 @@ pub fn sync_partitions(
                         }
                     }
                 }
-                // todo: somehow, if the sync was from existing actual node to a new one,
-                // it has to be memorized to avoid syncing again
                 recipient_id_to_last_state.retain(|_, state| !state.confirmed);
             } else {
                 for recipient_id in recipient_ids {
@@ -137,7 +156,22 @@ pub fn sync_partitions(
             }
         }
     }
-    state.sync.retain(|_, state| !state.is_empty())
+    let partitions = &state.partitions;
+    state.sync.retain(|partition_id, sync_state| {
+        if sync_state.is_empty() {
+            let curr_node_is_in_mapping =
+                partitions.mapping.get(partition_id).is_some_and(|mapping| {
+                    mapping.master == me.id || mapping.replicas.contains(&me.id)
+                });
+
+            if !curr_node_is_in_mapping {
+                runtime_store.remove_partition(partition_id);
+            }
+            false
+        } else {
+            true
+        }
+    });
 }
 
 fn sync_batch(
@@ -178,6 +212,7 @@ fn get_node_ids_curr_node_has_to_sync_the_partition_to<'a>(
     me: &NodeId,
     partitions: &'a Partitions,
     cluster_nodes: &HashMap<NodeId, Node>,
+    currently_synced_actual_nodes: Option<&HashSet<NodeId>>,
 ) -> HashSet<&'a NodeId> {
     let mut node_ids: HashSet<&'a NodeId> = HashSet::new();
 
@@ -203,7 +238,17 @@ fn get_node_ids_curr_node_has_to_sync_the_partition_to<'a>(
         && let Some(new_replicas) = partitions.new_replicas.get(&partition)
         && !new_replicas.contains(me)
     {
-        node_ids.extend(new_replicas);
+        if let Some(currently_synced_actual_nodes) = currently_synced_actual_nodes {
+            let new_replicas: HashSet<&NodeId> = new_replicas
+                .iter()
+                .filter(|&node_id| !currently_synced_actual_nodes.contains(node_id))
+                .collect();
+            if !new_replicas.is_empty() {
+                node_ids.extend(new_replicas);
+            }
+        } else {
+            node_ids.extend(new_replicas);
+        }
     }
 
     node_ids
@@ -251,6 +296,7 @@ pub fn handle_sync_batch(
 mod tests {
     use super::*;
     use crate::common::{NodeType, Partition};
+    use crate::worker::runtime_store::Record as StoredRecord;
 
     const PARTITION: PartitionId = PartitionId(17);
 
@@ -285,6 +331,53 @@ mod tests {
         actual.into_iter().cloned().collect()
     }
 
+    fn me(id: NodeId) -> Me {
+        Me {
+            id,
+            host: "worker.local".to_owned(),
+            port: 9000,
+        }
+    }
+
+    fn state(partitions: Partitions, nodes: HashMap<NodeId, Node>) -> State {
+        State {
+            epoch: Some(1),
+            elected_leader_id: Some(node_id(99)),
+            nodes,
+            partitions,
+            partitions_last_update_time: 42,
+            sync: HashMap::new(),
+            actual_nodes_sync_completion: HashMap::new(),
+        }
+    }
+
+    fn put_partition_record(store: &RuntimeStore) -> Key {
+        let key = Key(PARTITION.0 as u64);
+        store.put(
+            key,
+            StoredRecord {
+                value: vec![1],
+                expiration_time_ms: 0,
+                creation_time_ms: 1,
+            },
+        );
+        key
+    }
+
+    fn complete_first_batch(
+        state: &mut State,
+        output: &mut Vec<WorkerProtocol>,
+        store: &RuntimeStore,
+        me: &Me,
+        recipient: &NodeId,
+        key: Key,
+    ) {
+        sync_partitions(state, output, store, me);
+        handle_sync_batch_response(state, HashMap::from([(PARTITION, key)]), recipient.clone());
+        output.clear();
+        sync_partitions(state, output, store, me);
+    }
+
     #[test]
     fn old_replica_syncs_to_every_available_node_in_the_current_mapping_except_itself() {
         let me = node_id(1);
@@ -306,6 +399,7 @@ mod tests {
             &me,
             &partitions,
             &nodes,
+            None,
         );
 
         assert_eq!(owned_node_ids(actual), HashSet::from([master, replica]));
@@ -328,6 +422,7 @@ mod tests {
             &me,
             &partitions,
             &nodes,
+            None,
         );
 
         assert!(actual.is_empty());
@@ -356,6 +451,7 @@ mod tests {
             &me,
             &partitions,
             &nodes,
+            None,
         );
 
         assert_eq!(owned_node_ids(actual), HashSet::from([new_replica]));
@@ -377,6 +473,7 @@ mod tests {
             &me,
             &partitions,
             &nodes,
+            None,
         );
 
         assert_eq!(owned_node_ids(actual), HashSet::from([new_master]));
@@ -405,6 +502,7 @@ mod tests {
             &me,
             &partitions,
             &nodes,
+            None,
         );
 
         assert!(actual.is_empty());
@@ -427,8 +525,77 @@ mod tests {
             &me,
             &partitions,
             &nodes,
+            None,
         );
 
         assert!(actual.is_empty());
+    }
+
+    #[test]
+    fn retained_node_keeps_partition_and_remembers_completed_new_node() {
+        let current = node_id(1);
+        let new_replica = node_id(2);
+        let partitions = Partitions {
+            mapping: mapping(current.clone(), &[new_replica.clone()]),
+            old_replicas: HashMap::new(),
+            new_replicas: HashMap::from([(PARTITION, HashSet::from([new_replica.clone()]))]),
+        };
+        let mut state = state(
+            partitions,
+            cluster_nodes(&[current.clone(), new_replica.clone()]),
+        );
+        let me = me(current);
+        let store = RuntimeStore::new();
+        let key = put_partition_record(&store);
+        let mut output = vec![];
+
+        complete_first_batch(&mut state, &mut output, &store, &me, &new_replica, key);
+
+        assert!(store.get(key).is_some());
+        assert_eq!(
+            state.actual_nodes_sync_completion[&PARTITION][&new_replica],
+            state.partitions_last_update_time
+        );
+        assert!(
+            output.iter().any(|message| matches!(
+                message,
+                WorkerProtocol::RemovePartitionFromReplica { .. }
+            ))
+        );
+
+        output.clear();
+        sync_partitions(&mut state, &mut output, &store, &me);
+        assert!(output.is_empty(), "completed sync must not restart");
+    }
+
+    #[test]
+    fn obsolete_node_removes_partition_after_all_current_nodes_are_synced() {
+        let obsolete = node_id(1);
+        let new_master = node_id(2);
+        let partitions = Partitions {
+            mapping: mapping(new_master.clone(), &[]),
+            old_replicas: HashMap::from([(PARTITION, HashSet::from([obsolete.clone()]))]),
+            new_replicas: HashMap::new(),
+        };
+        let mut state = state(
+            partitions,
+            cluster_nodes(&[obsolete.clone(), new_master.clone()]),
+        );
+        let me = me(obsolete.clone());
+        let store = RuntimeStore::new();
+        let key = put_partition_record(&store);
+        let mut output = vec![];
+
+        complete_first_batch(&mut state, &mut output, &store, &me, &new_master, key);
+
+        assert!(store.get(key).is_none());
+        assert!(output.iter().any(|message| matches!(
+            message,
+            WorkerProtocol::RemovePartitionFromReplica {
+                replica_id,
+                partition_id,
+                ..
+            } if replica_id == &obsolete && partition_id == &PARTITION
+        )));
     }
 }

@@ -1,5 +1,5 @@
-use super::{get_random_number, Node, State};
-use crate::common::{now_millis, Heartbeat, Me, NodeId, NodeType};
+use super::{Node, State, get_random_number};
+use crate::common::{Heartbeat, Me, NodeId, NodeType, now_millis};
 use crate::manager::domain::ManagerProtocol;
 
 const HEARTBEAT_INTERVAL_MS: u64 = 200;
@@ -36,7 +36,7 @@ pub(super) fn heartbeats(state: &mut State, output: &mut Vec<ManagerProtocol>, m
                 ..
             }) = state
                 .nodes
-                .get_mut(&state.elected_leader_id.as_ref().unwrap())
+                .get_mut(&state.elected_leader_id.as_ref().expect("elected leader id is Some"))
             {
                 if *last_heartbeat + get_random_number() < now {
                     state.elected_leader_id = None;
