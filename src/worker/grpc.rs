@@ -10,20 +10,11 @@ use crate::{
     conversions::{
         common::v1::Addr,
         manager_api::v1::WorkerEvent,
-        worker_api::
-        v1::{
-            ClientEvent,
-            ClientRequest,
-            Connect,
-            ConnectResponse,
-            RequestType,
-            WorkerEvent as ClientApiWorkerEvent,
-            WorkerResponse,
-            client_event::Payload,
-            worker_api_server::WorkerApi,
-            worker_event,
-        }
-        ,
+        worker_api::v1::{
+            ClientEvent, ClientRequest, Connect, ConnectResponse, RequestType,
+            WorkerEvent as ClientApiWorkerEvent, WorkerResponse, client_event::Payload,
+            worker_api_server::WorkerApi, worker_api_server::WorkerApiServer, worker_event,
+        },
     },
     worker::runtime_store::RuntimeStore,
     worker::{
@@ -36,7 +27,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Request, Response, Status, Streaming};
+use tokio_util::sync::CancellationToken;
+use tonic::{Request, Response, Status, Streaming, transport::Server};
 
 const GRPC_CONNECTION_CHANNEL_BUFFER_SIZE: usize = 32;
 
@@ -218,4 +210,29 @@ impl WorkerApi for WorkerApiService {
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
+}
+
+pub async fn start_server(
+    config: crate::common::Config,
+    me: Me,
+    channel: (Sender<WorkerProtocol>, Receiver<WorkerProtocol>),
+    cancellation_token: CancellationToken,
+    runtime_store: RuntimeStore,
+) -> anyhow::Result<()> {
+    let grpc_address = format!("127.0.0.1:{}", config.grpc_port()).parse()?;
+
+    tracing::info!("GRPC Server is starting at {}", grpc_address);
+
+    Server::builder()
+        .add_service(WorkerApiServer::new(WorkerApiService::new(
+            channel,
+            me,
+            runtime_store,
+        )))
+        .serve_with_shutdown(grpc_address, cancellation_token.cancelled())
+        .await?;
+
+    tracing::info!("GRPC Server is stopped");
+
+    Ok(())
 }

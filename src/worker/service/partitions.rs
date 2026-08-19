@@ -79,6 +79,10 @@ fn sync_partition(
     partition_id: PartitionId,
     recipient_ids: HashSet<NodeId>,
 ) {
+    if let Some(recipient_states) = state.sync.get_mut(&partition_id) {
+        recipient_states.retain(|recipient_id, _| state.nodes.contains_key(recipient_id));
+    }
+
     for recipient_id in recipient_ids {
         let completed = sync_partition_to_recipient(
             state.sync.entry(partition_id).or_default(),
@@ -662,6 +666,35 @@ mod tests {
         output.clear();
         sync_partitions(&mut state, &mut output, &store, &me);
         assert!(output.is_empty(), "completed sync must not restart");
+    }
+
+    #[test]
+    fn removes_incomplete_sync_when_recipient_leaves_cluster() {
+        let current = node_id(1);
+        let new_replica = node_id(2);
+        let partitions = Partitions {
+            mapping: mapping(current.clone(), &[new_replica.clone()]),
+            old_replicas: HashMap::new(),
+            new_replicas: HashMap::from([(PARTITION, HashSet::from([new_replica.clone()]))]),
+        };
+        let mut state = state(
+            partitions,
+            cluster_nodes(&[current.clone(), new_replica.clone()]),
+        );
+        let me = me(current);
+        let store = RuntimeStore::new();
+        put_partition_record(&store);
+        let mut output = vec![];
+
+        sync_partitions(&mut state, &mut output, &store, &me);
+        assert!(state.sync[&PARTITION].contains_key(&new_replica));
+
+        state.nodes.remove(&new_replica);
+        output.clear();
+        sync_partitions(&mut state, &mut output, &store, &me);
+
+        assert!(!state.sync.contains_key(&PARTITION));
+        assert!(output.is_empty());
     }
 
     #[test]
