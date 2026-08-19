@@ -24,18 +24,6 @@ fn replicas(replicas: Vec<NodeId>) -> HashSet<NodeId> {
     replicas.into_iter().collect()
 }
 
-fn assert_no_old_replicas_overlap_new_mapping(partitions: &Partitions) {
-    for (partition_id, old_replicas) in &partitions.old_replicas {
-        let new_mapping = partitions
-            .mapping
-            .get(partition_id)
-            .expect("old replica partition has new mapping");
-
-        assert!(!old_replicas.contains(&new_mapping.master));
-        assert!(old_replicas.is_disjoint(&new_mapping.replicas));
-    }
-}
-
 #[tokio::test]
 async fn worker_partitions_recomputes_cluster_partition_mapping_and_broadcasts_cluster_state() {
     let me = me("11111111-1111-1111-1111-111111111111");

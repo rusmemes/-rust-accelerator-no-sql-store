@@ -88,7 +88,7 @@ pub(super) async fn output(
             WorkerProtocol::ClusterState { .. } => {
                 tracing::error!("ClusterState is not expected to be sent by workers");
             }
-            WorkerProtocol::Leader { id, epoch, ts } => {
+            WorkerProtocol::Leader { .. } => {
                 tracing::error!("Leader is not expected to be sent by workers");
             }
             WorkerProtocol::NodeDisconnected { .. } => {

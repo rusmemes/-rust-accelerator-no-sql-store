@@ -1,12 +1,8 @@
-use crate::common::{CommunicationStreamEither, NodeId};
+use crate::common::CommunicationStreamEither;
 use crate::conversions::manager_api::v1::WorkerEvent;
 use crate::conversions::worker_api::v1::WorkerEvent as ClientApiWorkerEvent;
-use crate::worker::domain::WorkerProtocol;
 use async_trait::async_trait;
-use std::collections::HashMap;
-use std::fmt::Debug;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::RwLock;
 use tonic::Status;
 
 type ClientApiWorkerIOStreamError = CommunicationStreamEither<Status, ClientApiWorkerEvent>;
@@ -80,35 +76,6 @@ impl IOStreamExt<WorkerEvent, WorkerIOStreamError> for WorkerIOStream {
         match self {
             WorkerIOStream::Input(sender) => sender.is_closed(),
             WorkerIOStream::Output(sender) => sender.is_closed(),
-        }
-    }
-}
-
-pub(super) async fn handle_common<Event, Error, Stream>(
-    event_type: &'static str,
-    event: impl FnOnce() -> Event,
-    tx: &Sender<WorkerProtocol>,
-    sessions: &RwLock<HashMap<NodeId, Stream>>,
-    id: NodeId,
-) where
-    Error: Debug,
-    Stream: IOStreamExt<Event, Error> + Clone,
-{
-    let is_closed = {
-        sessions
-            .read()
-            .await
-            .get(&id)
-            .is_some_and(|sender| sender.is_closed())
-    };
-
-    if is_closed {
-        tracing::debug!("Node {} is disconnected", id);
-        sessions.write().await.remove(&id);
-        let _ = tx.send(WorkerProtocol::NodeDisconnected { id }).await;
-    } else if let Some(sender) = { sessions.read().await.get(&id).cloned() } {
-        if let Err(e) = sender.send(event()).await {
-            tracing::error!("Error sending {event_type} to {}: {:?}", id, e);
         }
     }
 }

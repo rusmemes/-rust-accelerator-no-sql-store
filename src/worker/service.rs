@@ -1,4 +1,4 @@
-use crate::common::{ClusterState, Config, Heartbeat, Me, Node, NodeId, NodeType, now_millis};
+use crate::common::{ClusterState, Config, Heartbeat, Me, Node, NodeType, now_millis};
 use crate::worker::domain::WorkerProtocol;
 use crate::worker::runtime_store::RuntimeStore;
 use crate::worker::service::cluster_state::{handle_cluster_state, handle_remove_old_partition};
@@ -97,8 +97,7 @@ impl WorkerService {
                             leader_id,
                             nodes: items,
                             partitions,
-                        },
-                    ..
+                        }
                 } => handle_cluster_state(output, state, epoch, leader_id, items, partitions),
                 WorkerProtocol::NodeDisconnected { id } => {
                     handle_node_disconnected(state, id, &self.me)

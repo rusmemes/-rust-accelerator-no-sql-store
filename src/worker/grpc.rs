@@ -9,11 +9,12 @@ use crate::{
     common::{CommunicationStreamEither, Me, NodeId},
     conversions::{
         common::v1::Addr,
-        manager_api::v1::WorkerEvent,
         worker_api::v1::{
-            ClientEvent, ClientRequest, Connect, ConnectResponse, RequestType,
-            WorkerEvent as ClientApiWorkerEvent, WorkerResponse, client_event::Payload,
-            worker_api_server::WorkerApi, worker_api_server::WorkerApiServer, worker_event,
+            ClientEvent, ClientRequest, Connect, ConnectResponse, RequestType, WorkerEvent,
+            WorkerResponse,
+            client_event::Payload,
+            worker_api_server::{WorkerApi, WorkerApiServer},
+            worker_event,
         },
     },
     worker::runtime_store::RuntimeStore,
@@ -32,15 +33,10 @@ use tonic::{Request, Response, Status, Streaming, transport::Server};
 
 const GRPC_CONNECTION_CHANNEL_BUFFER_SIZE: usize = 32;
 
-pub(super) type WorkerIOStream =
+pub(super) type ClientApiWorkerIOStream =
     CommunicationStreamEither<Sender<Result<WorkerEvent, Status>>, Sender<WorkerEvent>>;
 
-pub(super) type ClientApiWorkerIOStream = CommunicationStreamEither<
-    Sender<Result<ClientApiWorkerEvent, Status>>,
-    Sender<ClientApiWorkerEvent>,
->;
-
-type OpenWorkerConnectionStream = ReceiverStream<Result<ClientApiWorkerEvent, Status>>;
+type OpenWorkerConnectionStream = ReceiverStream<Result<WorkerEvent, Status>>;
 type OpenClientConnectionStream = ReceiverStream<Result<ClientEvent, Status>>;
 
 pub struct WorkerApiService {
@@ -154,16 +150,16 @@ impl WorkerApi for WorkerApiService {
 
     async fn open_worker_connection(
         &self,
-        request: Request<Streaming<ClientApiWorkerEvent>>,
+        request: Request<Streaming<WorkerEvent>>,
     ) -> Result<Response<Self::OpenWorkerConnectionStream>, Status> {
         tracing::info!("Received open_worker_connection request");
 
         let remote_addr = request.remote_addr();
-        let mut input_stream: Streaming<ClientApiWorkerEvent> = request.into_inner();
+        let mut input_stream: Streaming<WorkerEvent> = request.into_inner();
 
         let (grpc_tx, rx): (
-            Sender<Result<ClientApiWorkerEvent, Status>>,
-            Receiver<Result<ClientApiWorkerEvent, Status>>,
+            Sender<Result<WorkerEvent, Status>>,
+            Receiver<Result<WorkerEvent, Status>>,
         ) = tokio::sync::mpsc::channel(GRPC_CONNECTION_CHANNEL_BUFFER_SIZE);
 
         let worker_sessions = self.worker_sessions.clone();
@@ -171,7 +167,7 @@ impl WorkerApi for WorkerApiService {
         let me = self.me.clone();
 
         tokio::spawn(async move {
-            if let Ok(Some(ClientApiWorkerEvent {
+            if let Ok(Some(WorkerEvent {
                 payload:
                     Some(worker_event::Payload::Connect(Connect {
                         id,
@@ -187,7 +183,7 @@ impl WorkerApi for WorkerApiService {
 
                 tokio::spawn(async move {
                     if grpc_tx
-                        .send(Ok(ClientApiWorkerEvent {
+                        .send(Ok(WorkerEvent {
                             payload: Some(worker_event::Payload::ConnectResponse(
                                 ConnectResponse {
                                     id: me.id.to_string(),
