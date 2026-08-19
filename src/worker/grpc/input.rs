@@ -115,7 +115,6 @@ pub(super) async fn input_from_manager<S>(
     host: String,
     port: u32,
     tx: Sender<WorkerProtocol>,
-    me: &Me,
 ) where
     S: tokio_stream::Stream<Item = Result<WorkerEvent, Status>> + Unpin,
 {
@@ -182,7 +181,6 @@ pub(super) async fn input_from_manager<S>(
                     if let Some(partitions) = partitions {
                         if let Err(e) = tx
                             .send(WorkerProtocol::ClusterState {
-                                recipient_id: me.id.clone(),
                                 state: common::ClusterState {
                                     epoch,
                                     leader_id: leader_id.into(),

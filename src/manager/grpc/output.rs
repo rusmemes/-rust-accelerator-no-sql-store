@@ -45,7 +45,7 @@ pub(super) async fn output(
                 .await;
             }
             ManagerProtocol::Heartbeat {
-                id: id,
+                id,
                 heartbeat: Heartbeat { id: node_id, ts },
             } => {
                 handle_output_heartbeat(&tx, &manager_sessions, &worker_sessions, id, node_id, ts)

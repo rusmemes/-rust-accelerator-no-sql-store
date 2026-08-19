@@ -19,7 +19,6 @@ pub enum WorkerProtocol {
         id: NodeId,
     },
     ClusterState {
-        recipient_id: NodeId,
         state: ClusterState,
     },
     NodeDisconnected {
