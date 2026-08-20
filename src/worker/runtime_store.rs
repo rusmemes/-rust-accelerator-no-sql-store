@@ -120,6 +120,32 @@ impl RuntimeStore {
             old.creation_time_ms <= record.creation_time_ms
         });
     }
+
+    /// Removes every record expired at or before `now_ms`.
+    ///
+    /// `DashMap` only locks one shard while a partition is looked up, and
+    /// `SkipMap` supports concurrent traversal and removal. Consequently this
+    /// scan never takes a store-wide lock and can run alongside reads/writes.
+    pub fn remove_expired(&self, now_ms: u64) -> usize {
+        let partition_ids: Vec<_> = self.cache.iter().map(|entry| *entry.key()).collect();
+        let mut removed = 0;
+
+        for partition_id in partition_ids {
+            if let Some(partition) = self.cache.get(&partition_id) {
+                for entry in partition.iter() {
+                    let expiration_time_ms = entry.value().expiration_time_ms;
+                    if expiration_time_ms != 0 && expiration_time_ms <= now_ms {
+                        entry.remove();
+                        removed += 1;
+                    }
+                }
+            }
+
+            self.remove_partition_if_empty(partition_id);
+        }
+
+        removed
+    }
 }
 
 #[cfg(test)]
@@ -338,5 +364,60 @@ mod tests {
                 .len();
         }
         assert_eq!(total_count, 50000);
+    }
+
+    #[test]
+    fn remove_expired_scans_all_partitions_and_keeps_live_records() {
+        let store = RuntimeStore::new();
+        let expired_one = Key(1);
+        let expired_two = Key(PARTITIONS_AMOUNT as u64 + 2);
+        let live = Key(3);
+        let immortal = Key(4);
+
+        for (key, expiration_time_ms) in [
+            (expired_one, 99),
+            (expired_two, 100),
+            (live, 101),
+            (immortal, 0),
+        ] {
+            store.put(
+                key,
+                Record {
+                    expiration_time_ms,
+                    creation_time_ms: 1,
+                    value: vec![key.0 as u8],
+                },
+            );
+        }
+
+        assert_eq!(store.remove_expired(100), 2);
+        assert!(
+            store
+                .cache
+                .get(&expired_one.partition())
+                .is_none_or(|partition| partition.get(&expired_one).is_none())
+        );
+        assert!(
+            store
+                .cache
+                .get(&expired_two.partition())
+                .is_none_or(|partition| partition.get(&expired_two).is_none())
+        );
+        assert!(
+            store
+                .cache
+                .get(&live.partition())
+                .unwrap()
+                .get(&live)
+                .is_some()
+        );
+        assert!(
+            store
+                .cache
+                .get(&immortal.partition())
+                .unwrap()
+                .get(&immortal)
+                .is_some()
+        );
     }
 }

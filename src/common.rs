@@ -118,8 +118,7 @@ impl Me {
 }
 
 #[derive(Debug, Clone)]
-pub enum Config
-{
+pub enum Config {
     Manager {
         grpc_port: u16,
         self_host_port: (String, u16),
@@ -130,11 +129,11 @@ pub enum Config
         grpc_port: u16,
         self_host_port: (String, u16),
         manager_host_port: (String, u16),
+        expired_cleanup_interval_secs: u64,
     },
 }
 
 impl Config {
-
     pub fn grpc_port(&self) -> u16 {
         match self {
             Config::Manager { grpc_port, .. } => *grpc_port,
@@ -144,8 +143,12 @@ impl Config {
 
     pub fn manager_host_port(&self) -> Option<&(String, u16)> {
         match self {
-            Config::Manager { manager_host_port, .. } => manager_host_port.as_ref(),
-            Config::Worker { manager_host_port, .. } => Some(manager_host_port),
+            Config::Manager {
+                manager_host_port, ..
+            } => manager_host_port.as_ref(),
+            Config::Worker {
+                manager_host_port, ..
+            } => Some(manager_host_port),
         }
     }
 
@@ -177,6 +180,18 @@ impl Config {
             }
         }
     }
+
+    pub fn expired_cleanup_interval_secs(&self) -> u64 {
+        match self {
+            Config::Worker {
+                expired_cleanup_interval_secs,
+                ..
+            } => *expired_cleanup_interval_secs,
+            Config::Manager { .. } => {
+                unreachable!("Expired-record cleanup is only run by workers")
+            }
+        }
+    }
 }
 
 impl From<Cli> for Config {
@@ -197,10 +212,12 @@ impl From<Cli> for Config {
                 common,
                 manager_host,
                 manager_port,
+                expired_cleanup_interval_secs,
             } => Config::Worker {
                 grpc_port: common.grpc_port,
                 self_host_port: (common.self_host.clone(), common.self_port()),
                 manager_host_port: (manager_host, manager_port),
+                expired_cleanup_interval_secs,
             },
         }
     }
@@ -302,10 +319,12 @@ mod tests {
                 grpc_port,
                 self_host_port,
                 manager_host_port,
+                expired_cleanup_interval_secs,
             } => {
                 assert_eq!(grpc_port, 5001);
                 assert_eq!(self_host_port, ("127.0.0.1".to_string(), 7777));
                 assert_eq!(manager_host_port, ("10.0.0.1".to_string(), 6000));
+                assert_eq!(expired_cleanup_interval_secs, 300);
             }
             other => panic!("unexpected config: {:?}", other),
         }
