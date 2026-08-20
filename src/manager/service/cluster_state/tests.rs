@@ -174,6 +174,7 @@ async fn cluster_state_updates_known_nodes_and_requests_unknown_managers() {
             ),
         ],
         Partitions::default(),
+        &me,
     );
 
     assert!(matches!(
@@ -186,7 +187,7 @@ async fn cluster_state_updates_known_nodes_and_requests_unknown_managers() {
     assert_eq!(state.epoch, Some(2));
     assert_eq!(state.elected_leader_id, Some(me.id.clone()));
     assert_eq!(state.nodes.get(&me.id).unwrap().last_heartbeat, now + 1);
-    assert_eq!(state.nodes.get(&peer).unwrap().last_heartbeat, now);
+    assert!(!state.nodes.contains_key(&peer));
 }
 
 #[tokio::test]
@@ -218,6 +219,7 @@ async fn cluster_state_accepts_new_epoch_same_leader_and_rejects_conflicts() {
             cluster_node(leader.clone(), "leader.local", 9001, now, NodeType::Manager),
         ],
         Partitions::default(),
+        &me,
     );
     assert!(first.is_empty());
     assert_eq!(service.state.as_ref().unwrap().epoch, Some(4));
@@ -236,6 +238,7 @@ async fn cluster_state_accepts_new_epoch_same_leader_and_rejects_conflicts() {
             NodeType::Manager,
         )],
         Partitions::default(),
+        &me,
     );
     assert!(same_epoch_same_leader.is_empty());
     assert_eq!(
@@ -264,6 +267,7 @@ async fn cluster_state_accepts_new_epoch_same_leader_and_rejects_conflicts() {
             NodeType::Manager,
         )],
         Partitions::default(),
+        &me,
     );
     assert!(conflict.is_empty());
     assert_eq!(service.state.as_ref().unwrap().epoch, Some(4));
@@ -334,6 +338,7 @@ async fn cluster_state_applies_partition_mapping_and_adds_unknown_workers() {
             )]),
             new_replicas: Default::default(),
         },
+        &me,
     );
 
     assert!(output.is_empty());
@@ -414,6 +419,7 @@ async fn stale_cluster_state_is_ignored() {
             NodeType::Manager,
         )],
         Partitions::default(),
+        &me,
     );
 
     assert!(output.is_empty());

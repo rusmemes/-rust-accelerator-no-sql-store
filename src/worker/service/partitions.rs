@@ -40,14 +40,11 @@ pub fn sync_partitions(
 
     for partition_id in 0..PARTITIONS_AMOUNT {
         let partition_id = PartitionId(partition_id as u16);
-        if runtime_store
+        let partition_empty = runtime_store
             .get_partition_records(&partition_id, 1, None)
-            .is_empty()
-        {
-            continue;
-        }
+            .is_empty();
 
-        let recipient_ids = get_node_ids_curr_node_has_to_sync_the_partition_to(
+        let recipient_ids: HashSet<NodeId> = get_node_ids_curr_node_has_to_sync_the_partition_to(
             partition_id,
             &me.id,
             &state.partitions,
@@ -58,14 +55,21 @@ pub fn sync_partitions(
         .cloned()
         .collect();
 
-        sync_partition(
-            state,
-            output,
-            runtime_store,
-            me,
-            partition_id,
-            recipient_ids,
-        );
+        if !recipient_ids.is_empty() && partition_empty {
+            for recipient_id in recipient_ids {
+                record_completed_sync(state, output, me, partition_id, recipient_id);
+            }
+            state.sync.entry(partition_id).or_default();
+        } else {
+            sync_partition(
+                state,
+                output,
+                runtime_store,
+                me,
+                partition_id,
+                recipient_ids,
+            );
+        }
     }
 
     remove_completed_syncs_and_obsolete_partitions(state, runtime_store, me);
@@ -726,5 +730,39 @@ mod tests {
                 ..
             } if replica_id == &obsolete && partition_id == &PARTITION
         )));
+    }
+
+    #[test]
+    fn empty_partition_is_acknowledged_without_sending_a_batch() {
+        let obsolete = node_id(1);
+        let new_master = node_id(2);
+        let partitions = Partitions {
+            mapping: mapping(new_master.clone(), &[]),
+            old_replicas: HashMap::from([(PARTITION, HashSet::from([obsolete.clone()]))]),
+            new_replicas: HashMap::new(),
+        };
+        let mut state = state(
+            partitions,
+            cluster_nodes(&[obsolete.clone(), new_master.clone()]),
+        );
+        let me = me(obsolete.clone());
+        let store = RuntimeStore::new();
+        let mut output = vec![];
+
+        sync_partitions(&mut state, &mut output, &store, &me);
+
+        assert!(output.iter().any(|message| matches!(
+            message,
+            WorkerProtocol::RemovePartitionFromReplica {
+                replica_id,
+                partition_id,
+                ..
+            } if replica_id == &obsolete && partition_id == &PARTITION
+        )));
+        assert!(
+            !output
+                .iter()
+                .any(|message| matches!(message, WorkerProtocol::SyncBatch { .. }))
+        );
     }
 }

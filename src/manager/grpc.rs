@@ -3,15 +3,11 @@ use crate::{
     conversions::{
         common::v1::Addr,
         manager_api::v1::{
-            Config,
-            Connect,
-            ConnectResponse,
-            ManagerEvent,
-            WorkerEvent
-            ,
+            Config, Connect, ConnectResponse, ManagerEvent, WorkerEvent,
             manager_api_server::{ManagerApi, ManagerApiServer},
             manager_event::Payload,
-            worker_event},
+            worker_event,
+        },
     },
     manager::domain::ManagerProtocol,
 };
@@ -207,14 +203,15 @@ pub async fn start_server(
     channel: (Sender<ManagerProtocol>, Receiver<ManagerProtocol>),
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
-
     let grpc_port = { config.read().await.grpc_port() };
-    let grpc_address = format!("127.0.0.1:{grpc_port}").as_str().parse()?;
+    let grpc_address = format!("0.0.0.0:{grpc_port}").parse()?;
 
     tracing::info!("GRPC Server is starting at {}", grpc_address);
 
     Server::builder()
-        .add_service(ManagerApiServer::new(ManagerApiService::new(channel, me, config)))
+        .add_service(ManagerApiServer::new(ManagerApiService::new(
+            channel, me, config,
+        )))
         .serve_with_shutdown(grpc_address, cancellation_token.cancelled())
         .await?;
 

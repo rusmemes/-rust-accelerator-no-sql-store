@@ -5,7 +5,9 @@ use crate::worker::service::cluster_state::{handle_cluster_state, handle_remove_
 use crate::worker::service::connection::{handle_new_connection, handle_node_disconnected};
 use crate::worker::service::election::handle_leader;
 use crate::worker::service::heartbeat::{handle_heartbeat, heartbeats};
-use crate::worker::service::partitions::{handle_sync_batch, handle_sync_batch_response, sync_partitions};
+use crate::worker::service::partitions::{
+    handle_sync_batch, handle_sync_batch_response, sync_partitions,
+};
 use crate::worker::service::state::State;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -17,8 +19,8 @@ mod cluster_state;
 mod connection;
 mod election;
 mod heartbeat;
-mod state;
 mod partitions;
+mod state;
 
 struct WorkerService {
     me: Me,
@@ -61,7 +63,9 @@ impl WorkerService {
                 host: host.clone(),
                 port: (*port) as u32,
                 manager: true,
-            })
+            });
+
+            self.state = Some(State::new(nodes))
         }
         output
     }
@@ -97,8 +101,10 @@ impl WorkerService {
                             leader_id,
                             nodes: items,
                             partitions,
-                        }
-                } => handle_cluster_state(output, state, epoch, leader_id, items, partitions),
+                        },
+                } => handle_cluster_state(
+                    output, state, epoch, leader_id, items, partitions, &self.me,
+                ),
                 WorkerProtocol::NodeDisconnected { id } => {
                     handle_node_disconnected(state, id, &self.me)
                 }
@@ -111,8 +117,15 @@ impl WorkerService {
                 WorkerProtocol::SyncBatch { request, .. } => {
                     handle_sync_batch(output, &request, &self.runtime_store);
                 }
-                WorkerProtocol::SyncBatchResponse { recipient_id, partition_id_to_max_applied_key } => {
-                    handle_sync_batch_response(state, partition_id_to_max_applied_key, recipient_id);
+                WorkerProtocol::SyncBatchResponse {
+                    recipient_id,
+                    partition_id_to_max_applied_key,
+                } => {
+                    handle_sync_batch_response(
+                        state,
+                        partition_id_to_max_applied_key,
+                        recipient_id,
+                    );
                 }
             }
         }

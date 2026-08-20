@@ -1,6 +1,7 @@
 use super::{Node, State};
 use crate::common::{ClusterNode, ClusterState, Me, NodeId, NodeType, PartitionId, Partitions};
 use crate::manager::domain::ManagerProtocol;
+use std::collections::HashSet;
 
 pub(super) fn handle_cluster_state(
     output: &mut Vec<ManagerProtocol>,
@@ -9,6 +10,7 @@ pub(super) fn handle_cluster_state(
     leader_id: NodeId,
     items: Vec<ClusterNode>,
     partitions: Partitions,
+    me: &Me,
 ) {
     let accept: bool = if state.epoch.is_none() || state.epoch < Some(epoch) {
         state.epoch = Some(epoch);
@@ -22,6 +24,15 @@ pub(super) fn handle_cluster_state(
 
     if accept {
         state.partitions = partitions;
+
+        // An empty node list is a partitions-only update. A non-empty list is
+        // a complete membership snapshot and supersedes the local view.
+        if !items.is_empty() {
+            let snapshot_node_ids: HashSet<_> = items.iter().map(|item| item.id.clone()).collect();
+            state
+                .nodes
+                .retain(|id, _| id == &me.id || snapshot_node_ids.contains(id));
+        }
 
         for item in items {
             match item {
