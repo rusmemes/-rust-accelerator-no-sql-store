@@ -12,6 +12,18 @@ fn parse_replication_factor(value: &str) -> Result<usize, String> {
     }
 }
 
+fn parse_positive_u64(value: &str) -> Result<u64, String> {
+    let value = value
+        .parse::<u64>()
+        .map_err(|_| "value must be a positive integer".to_string())?;
+
+    if value == 0 {
+        Err("value must be at least 1".to_string())
+    } else {
+        Ok(value)
+    }
+}
+
 #[derive(Args)]
 pub struct CommonArgs {
     #[arg(long)]
@@ -59,6 +71,13 @@ pub enum Command {
 
         #[arg(long)]
         manager_port: u16,
+
+        #[arg(
+            long,
+            default_value_t = 300,
+            value_parser = parse_positive_u64
+        )]
+        expired_cleanup_interval_secs: u64,
     },
 }
 
@@ -195,5 +214,50 @@ mod tests {
             Command::Worker { common, .. } => assert_eq!(common.self_port(), 5001),
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn worker_expired_cleanup_interval_defaults_to_five_minutes() {
+        let cli = Cli::try_parse_from([
+            "bin",
+            "worker",
+            "--grpc-port",
+            "5001",
+            "--self-host",
+            "127.0.0.1",
+            "--manager-host",
+            "10.0.0.1",
+            "--manager-port",
+            "6000",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Worker {
+                expired_cleanup_interval_secs,
+                ..
+            } => assert_eq!(expired_cleanup_interval_secs, 300),
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn worker_expired_cleanup_interval_must_be_positive() {
+        let result = Cli::try_parse_from([
+            "bin",
+            "worker",
+            "--grpc-port",
+            "5001",
+            "--self-host",
+            "127.0.0.1",
+            "--manager-host",
+            "10.0.0.1",
+            "--manager-port",
+            "6000",
+            "--expired-cleanup-interval-secs",
+            "0",
+        ]);
+
+        assert!(result.is_err());
     }
 }

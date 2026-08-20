@@ -7,9 +7,43 @@ use crate::common::{Config, Me};
 use crate::worker::grpc::start_server;
 use crate::worker::runtime_store::RuntimeStore;
 use crate::worker::service::start_service;
+use std::time::Duration;
 use tokio::select;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
+
+fn start_expired_cleanup(
+    runtime_store: RuntimeStore,
+    interval: Duration,
+    cancellation_token: CancellationToken,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval_at(Instant::now() + interval, interval);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+        loop {
+            select! {
+                _ = cancellation_token.cancelled() => break,
+                _ = ticker.tick() => {
+                    let store = runtime_store.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        store.remove_expired(crate::common::now_millis())
+                    }).await {
+                        Ok(removed) if removed > 0 => {
+                            tracing::info!("Removed {removed} expired worker records");
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::error!("Expired-record cleanup task failed: {error}");
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let _ = config
@@ -29,7 +63,13 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     tracing::info!("Starting worker {:?}", me);
 
     let runtime_store = RuntimeStore::new();
+    let expired_cleanup_interval = Duration::from_secs(config.expired_cleanup_interval_secs());
     let cancellation_token = CancellationToken::new();
+    let cleanup_join_handle = start_expired_cleanup(
+        runtime_store.clone(),
+        expired_cleanup_interval,
+        cancellation_token.child_token(),
+    );
     let grpc_join_handle = start_server(
         config.clone(),
         me.clone(),
@@ -52,6 +92,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             }
         },
         _ = service_join_handle => tracing::info!("Worker service stopped"),
+        _ = cleanup_join_handle => tracing::info!("Expired-record cleanup stopped"),
         _ = sigterm.recv() => tracing::info!("SIGTERM received"),
         _ = sigint.recv() => tracing::info!("SIGINT received"),
         _ = cancellation_token.cancelled() => {},
