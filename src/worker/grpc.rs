@@ -215,7 +215,7 @@ pub async fn start_server(
     cancellation_token: CancellationToken,
     runtime_store: RuntimeStore,
 ) -> anyhow::Result<()> {
-    let grpc_address = format!("127.0.0.1:{}", config.grpc_port()).parse()?;
+    let grpc_address = format!("0.0.0.0:{}", config.grpc_port()).parse()?;
 
     tracing::info!("GRPC Server is starting at {}", grpc_address);
 

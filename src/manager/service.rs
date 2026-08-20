@@ -1,9 +1,9 @@
-use crate::common::{now_millis, ClusterState, Config, Heartbeat, Me, Node, NodeType};
+use crate::common::{ClusterState, Config, Heartbeat, Me, Node, NodeType, now_millis};
 use crate::manager::domain::ManagerProtocol;
 use cluster_state::{handle_cluster_state, handle_get_cluster_state};
 use connection::{handle_new_connection, handle_node_disconnected};
 use election::{
-    handle_leader, handle_vote_request, handle_vote_response, start_election_if_needed, Election,
+    Election, handle_leader, handle_vote_request, handle_vote_response, start_election_if_needed,
 };
 use heartbeat::{handle_heartbeat, heartbeats};
 use partitions::worker_partitions;
@@ -139,7 +139,9 @@ impl ManagerService {
                             partitions,
                         },
                     ..
-                } => handle_cluster_state(output, state, epoch, leader_id, items, partitions),
+                } => handle_cluster_state(
+                    output, state, epoch, leader_id, items, partitions, &self.me,
+                ),
                 ManagerProtocol::VoteRequest { id, epoch, ts } => {
                     tracing::info!("VoteRequest: {:?} {:?}", id, epoch);
                     handle_vote_request(output, state, id, epoch, ts, &mut self.elections);

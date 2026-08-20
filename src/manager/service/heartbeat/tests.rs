@@ -1,8 +1,8 @@
 use super::*;
 use crate::common::now_millis;
 use crate::manager::domain::ManagerProtocol;
-use crate::manager::service::test_support::*;
 use crate::manager::service::State;
+use crate::manager::service::test_support::*;
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -146,6 +146,33 @@ async fn heartbeat_from_worker_updates_worker_without_forwarding() {
             .last_heartbeat,
         44
     );
+}
+
+#[tokio::test]
+async fn older_heartbeat_does_not_move_last_heartbeat_backwards() {
+    let me = me("11111111-1111-1111-1111-111111111111");
+    let peer = node_id("22222222-2222-2222-2222-222222222222");
+    let (mut service, _config) = service(me.clone());
+    service.state = Some(State {
+        epoch: Some(1),
+        elected_leader_id: Some(peer.clone()),
+        nodes: HashMap::from([
+            (me.id.clone(), fresh_node(&me, 100)),
+            (peer.clone(), node("peer.local", 9001, 200)),
+        ]),
+        partitions: Default::default(),
+        workers_with_calculated_partitions: Default::default(),
+    });
+
+    handle_heartbeat(
+        &mut vec![],
+        service.state.as_mut().unwrap(),
+        peer.clone(),
+        150,
+        &me,
+    );
+
+    assert_eq!(service.state.unwrap().nodes[&peer].last_heartbeat, 200);
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-use crate::common::{now_millis, Heartbeat, Me, Node, NodeId, NodeType};
+use crate::common::{Heartbeat, Me, Node, NodeId, NodeType, now_millis};
 use crate::worker::domain::WorkerProtocol;
 use crate::worker::service::state::State;
 
@@ -45,7 +45,7 @@ pub(super) fn handle_heartbeat(
             );
         }
         Some(node) => {
-            node.last_heartbeat = ts;
+            node.last_heartbeat = node.last_heartbeat.max(ts);
         }
     }
 }

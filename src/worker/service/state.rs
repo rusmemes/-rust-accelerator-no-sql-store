@@ -14,6 +14,18 @@ pub struct State {
 }
 
 impl State {
+    pub fn new(nodes: HashMap<NodeId, Node>) -> Self {
+        Self {
+            epoch: None,
+            elected_leader_id: None,
+            nodes,
+            partitions: Partitions::default(),
+            partitions_last_update_time: 0,
+            sync: Default::default(),
+            actual_nodes_sync_completion: Default::default(),
+        }
+    }
+
     pub fn get_currently_synced_actual_nodes(&self) -> HashMap<PartitionId, HashSet<NodeId>> {
         self.actual_nodes_sync_completion
             .iter()
