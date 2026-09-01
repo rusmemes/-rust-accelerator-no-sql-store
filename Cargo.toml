@@ -3,5 +3,6 @@ members = [
     "crates/no-sql-store",
     "crates/no-sql-store-client",
     "crates/no-sql-store-e2e-tests",
+    "crates/no-sql-store-proto",
 ]
 resolver = "3"

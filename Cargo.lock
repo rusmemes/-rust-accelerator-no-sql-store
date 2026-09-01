@@ -715,14 +715,12 @@ dependencies = [
  "clap_derive",
  "crossbeam-skiplist",
  "dashmap",
- "prost",
+ "no-sql-store-proto",
  "rand",
  "tokio",
  "tokio-stream",
  "tokio-util",
  "tonic",
- "tonic-prost",
- "tonic-prost-build",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -734,13 +732,11 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "futures",
- "prost",
+ "no-sql-store-proto",
  "thiserror",
  "tokio",
  "tokio-stream",
  "tonic",
- "tonic-prost",
- "tonic-prost-build",
  "uuid",
 ]
 
@@ -750,13 +746,21 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "no-sql-store-client",
- "prost",
+ "no-sql-store-proto",
  "tokio",
  "tokio-stream",
  "tonic",
+ "uuid",
+]
+
+[[package]]
+name = "no-sql-store-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "tonic",
  "tonic-prost",
  "tonic-prost-build",
- "uuid",
 ]
 
 [[package]]

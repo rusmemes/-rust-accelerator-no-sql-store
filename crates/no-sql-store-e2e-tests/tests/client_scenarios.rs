@@ -10,27 +10,9 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_stream::wrappers::ReceiverStream;
 
-mod proto {
-    pub mod common {
-        pub mod v1 {
-            tonic::include_proto!("common.v1");
-        }
-    }
-    pub mod manager_api {
-        pub mod v1 {
-            tonic::include_proto!("manager_api.v1");
-        }
-    }
-    pub mod worker_api {
-        pub mod v1 {
-            tonic::include_proto!("worker_api.v1");
-        }
-    }
-}
-
-use proto::common::v1::{ClusterState, NodeType};
-use proto::manager_api::v1::{ClientConnect, manager_api_client::ManagerApiClient};
-use proto::worker_api::v1::{
+use no_sql_store_proto::common::v1::{ClusterState, NodeType};
+use no_sql_store_proto::manager_api::v1::{ClientConnect, manager_api_client::ManagerApiClient};
+use no_sql_store_proto::worker_api::v1::{
     ClientEvent, ClientRequest, Record, RequestType, client_event::Payload,
     worker_api_client::WorkerApiClient,
 };
@@ -62,8 +44,22 @@ async fn all_public_client_scenarios() -> Result<()> {
     let worker_two_port = free_port()?;
 
     let _manager = start_manager(&binary, manager_port, None)?;
+    let manager_endpoint = endpoint(manager_port);
+    wait_for_endpoint(&manager_endpoint).await?;
+
     let _second_manager = start_manager(&binary, second_manager_port, Some((HOST, manager_port)))?;
     let _third_manager = start_manager(&binary, third_manager_port, Some((HOST, manager_port)))?;
+    wait_for_state(&manager_endpoint, Duration::from_secs(15), |state| {
+        state
+            .nodes
+            .iter()
+            .filter(|node| node.node_type == NodeType::Manager as i32)
+            .count()
+            >= 3
+    })
+    .await
+    .context("manager topology did not become ready")?;
+
     let mut worker_one = start_worker(&binary, worker_one_port, manager_port)?;
     let _worker_two = start_worker(&binary, worker_two_port, manager_port)?;
 
@@ -73,7 +69,6 @@ async fn all_public_client_scenarios() -> Result<()> {
         request_timeout: Duration::from_millis(500),
         manager_connect_timeout: Duration::from_secs(2),
     };
-    let manager_endpoint = endpoint(manager_port);
     let client = connect_eventually(&manager_endpoint, config.clone()).await?;
     let state = wait_for_state(&manager_endpoint, Duration::from_secs(15), |state| {
         worker_nodes(state).count() == 2
@@ -82,7 +77,8 @@ async fn all_public_client_scenarios() -> Result<()> {
                 .as_ref()
                 .is_some_and(|p| !p.mapping.is_empty())
     })
-    .await?;
+    .await
+    .context("worker topology did not become ready")?;
 
     client.put(42_u64, b"numeric".to_vec(), None).await?;
     assert_eq!(client.get(42_u64).await?, Some(b"numeric".to_vec()));
@@ -135,13 +131,20 @@ async fn all_public_client_scenarios() -> Result<()> {
     }
 
     let master_endpoint = worker_endpoint(&state, &mapping.master)?;
-    raw_worker_request(&master_enduse tonic::codegen::http::Uri;
-    use tonic::codegen::*;
+    raw_worker_request(
+        &master_endpoint,
+        RequestType::Delete,
+        key,
+        None,
+        None,
+    )
+    .await?;
     assert_eq!(
         client.get(key).await?,
         Some(b"replicated".to_vec()),
-        "client must fall back to a replica whuse tonic::codegen::http::Uri;
-use tonic::codegen::*;wait?;
+        "client must fall back to a replica when the master has no record"
+    );
+    client.delete(key).await?;
     for node_id in &holders {
         let address = worker_endpoint(&state, node_id)?;
         assert!(
@@ -250,10 +253,19 @@ fn server_binary() -> Result<PathBuf> {
     }
     path.push(format!("no-sql-store{}", std::env::consts::EXE_SUFFIX));
     if !path.is_file() {
-        bail!(
-            "server binary not found at {}; run `cargo build -p no-sql-store` first",
-            path.display()
-        );
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|crates| crates.parent())
+            .context("could not find workspace root")?
+            .to_owned();
+        let status = Command::new(env!("CARGO"))
+            .args(["build", "-p", "no-sql-store"])
+            .current_dir(workspace)
+            .status()
+            .context("could not build no-sql-store server binary")?;
+        if !status.success() || !path.is_file() {
+            bail!("server binary was not produced at {}", path.display());
+        }
     }
     Ok(path)
 }
@@ -327,6 +339,17 @@ async fn connect_eventually(endpoint: &str, config: ClientConfig) -> Result<Clie
         .await
 }
 
+async fn wait_for_endpoint(endpoint: &str) -> Result<()> {
+    retry_until(Duration::from_secs(15), || async {
+        tonic::transport::Endpoint::from_shared(endpoint.to_owned())?
+            .connect()
+            .await?;
+        Ok(())
+    })
+    .await
+    .context("manager gRPC endpoint did not become ready")
+}
+
 async fn wait_for_state(
     endpoint: &str,
     duration: Duration,
@@ -360,7 +383,9 @@ async fn manager_snapshot(endpoint: &str) -> Result<ClusterState> {
         .context("manager returned no state")
 }
 
-fn worker_nodes(state: &ClusterState) -> impl Iterator<Item=&proto::common::v1::Node> {
+fn worker_nodes(
+    state: &ClusterState,
+) -> impl Iterator<Item = &no_sql_store_proto::common::v1::Node> {
     state
         .nodes
         .iter()

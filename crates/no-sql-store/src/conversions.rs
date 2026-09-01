@@ -2,23 +2,7 @@ use crate::common::{NodeType, Partition, PartitionId, Partitions};
 use crate::conversions::common::v1;
 use std::collections::HashMap;
 
-pub mod manager_api {
-    pub mod v1 {
-        tonic::include_proto!("manager_api.v1");
-    }
-}
-
-pub mod worker_api {
-    pub mod v1 {
-        tonic::include_proto!("worker_api.v1");
-    }
-}
-
-pub mod common {
-    pub mod v1 {
-        tonic::include_proto!("common.v1");
-    }
-}
+pub use no_sql_store_proto::{common, manager_api, worker_api};
 
 pub(crate) fn grpc_node_type_to_domain(node_type: i32) -> NodeType {
     match v1::NodeType::try_from(node_type).ok() {

@@ -7,12 +7,8 @@ publish = false
 [dependencies]
 anyhow = "1"
 no-sql-store-client = { path = "../no-sql-store-client" }
-prost = "0.14.3"
+no-sql-store-proto = { path = "../no-sql-store-proto" }
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-stream = "0.1.18"
 tonic = "0.14.5"
-tonic-prost = "0.14.5"
 uuid = { version = "1.23.4", features = ["v7"] }
-
-[build-dependencies]
-tonic-prost-build = "0.14.5"
