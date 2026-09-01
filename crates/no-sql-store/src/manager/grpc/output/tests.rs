@@ -78,6 +78,7 @@ async fn output_routes_cluster_state_to_worker_session_includes_partitions() {
         &tx,
         &manager_sessions,
         &worker_sessions,
+        &RwLock::new(HashMap::new()),
         worker_id.clone(),
         5,
         manager_node_id.clone(),
@@ -175,6 +176,7 @@ async fn output_routes_cluster_state_to_manager_session_includes_partitions() {
         &tx,
         &manager_sessions,
         &worker_sessions,
+        &RwLock::new(HashMap::new()),
         manager_id.clone(),
         2,
         me.id.clone(),
@@ -214,6 +216,32 @@ async fn output_routes_cluster_state_to_manager_session_includes_partitions() {
             .mapping
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn output_pushes_cluster_state_to_subscribed_clients() {
+    let recipient_id = node_id("22222222-2222-2222-2222-222222222222");
+    let client_id = node_id("33333333-3333-3333-3333-333333333333");
+    let leader_id = node_id("11111111-1111-1111-1111-111111111111");
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    let (client_tx, mut client_rx) = tokio::sync::mpsc::channel(4);
+    let client_sessions = RwLock::new(HashMap::from([(client_id, client_tx)]));
+
+    handle_output_cluster_state(
+        &tx,
+        &RwLock::new(HashMap::new()),
+        &RwLock::new(HashMap::new()),
+        &client_sessions,
+        recipient_id,
+        9,
+        leader_id,
+        vec![],
+        Partitions::default(),
+    )
+    .await;
+
+    let event = client_rx.recv().await.unwrap().unwrap();
+    assert_eq!(event.cluster_state.unwrap().epoch, 9);
 }
 
 #[tokio::test]

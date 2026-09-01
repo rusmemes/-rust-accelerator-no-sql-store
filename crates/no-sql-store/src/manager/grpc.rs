@@ -3,7 +3,7 @@ use crate::{
     conversions::{
         common::v1::Addr,
         manager_api::v1::{
-            Config, Connect, ConnectResponse, ManagerEvent, WorkerEvent,
+            ClientConnect, ClientEvent, Config, Connect, ConnectResponse, ManagerEvent, WorkerEvent,
             manager_api_server::{ManagerApi, ManagerApiServer},
             manager_event::Payload,
             worker_event,
@@ -33,11 +33,13 @@ const GRPC_CONNECTION_CHANNEL_BUFFER_SIZE: usize = 32;
 
 type OpenConnectionStream = ReceiverStream<Result<ManagerEvent, Status>>;
 type OpenWorkerConnectionStream = ReceiverStream<Result<WorkerEvent, Status>>;
+type OpenClientConnectionStream = ReceiverStream<Result<ClientEvent, Status>>;
 
 pub struct ManagerApiService {
     me: Me,
     manager_sessions: Arc<RwLock<HashMap<NodeId, ManagerIOStream>>>,
     worker_sessions: Arc<RwLock<HashMap<NodeId, WorkerIOStream>>>,
+    client_sessions: Arc<RwLock<HashMap<NodeId, Sender<Result<ClientEvent, Status>>>>>,
     tx: Sender<ManagerProtocol>,
     config: Arc<RwLock<crate::common::Config>>,
 }
@@ -51,11 +53,14 @@ impl ManagerApiService {
         let manager_sessions_clone = manager_sessions.clone();
         let worker_sessions: Arc<RwLock<HashMap<NodeId, WorkerIOStream>>> = Default::default();
         let worker_sessions_clone = worker_sessions.clone();
+        let client_sessions = Arc::new(RwLock::new(HashMap::new()));
+        let client_sessions_clone = client_sessions.clone();
         let tx_clone = tx.clone();
         let service = Self {
             me: me.clone(),
             manager_sessions,
             worker_sessions,
+            client_sessions,
             tx,
             config: config.clone(),
         };
@@ -65,6 +70,7 @@ impl ManagerApiService {
             rx,
             manager_sessions_clone,
             worker_sessions_clone,
+            client_sessions_clone,
             config,
         ));
         service
@@ -73,6 +79,22 @@ impl ManagerApiService {
 
 #[tonic::async_trait]
 impl ManagerApi for ManagerApiService {
+    type OpenClientConnectionStream = OpenClientConnectionStream;
+
+    async fn open_client_connection(
+        &self,
+        request: Request<ClientConnect>,
+    ) -> Result<Response<Self::OpenClientConnectionStream>, Status> {
+        let id: NodeId = request.into_inner().id.into();
+        let (grpc_tx, rx) = tokio::sync::mpsc::channel(GRPC_CONNECTION_CHANNEL_BUFFER_SIZE);
+        self.client_sessions.write().await.insert(id.clone(), grpc_tx);
+        self.tx
+            .send(ManagerProtocol::GetClusterState { id })
+            .await
+            .map_err(|_| Status::unavailable("manager service is stopped"))?;
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
     type OpenConnectionStream = OpenConnectionStream;
 
     async fn open_connection(

@@ -96,7 +96,7 @@ impl WorkerApi for WorkerApiService {
                     payload: Some(Payload::Request(request)),
                 } = event
                 {
-                    let (request_id, value) = match request {
+                    let (request_id, record) = match request {
                         ClientRequest {
                             id,
                             request_type,
@@ -127,13 +127,18 @@ impl WorkerApi for WorkerApiService {
                             ..
                         } /* considered as Get request */ => {
                             let option = runtime_store.get(Key(key));
-                            (id, option.map(|r| r.value.clone()))
+                            (id, option.map(|record| crate::conversions::worker_api::v1::Record {
+                                key,
+                                value: record.value.clone(),
+                                ttl: record.expiration_time_ms,
+                                creation_time: record.creation_time_ms,
+                            }))
                         },
                     };
 
                     if let Err(e) = grpc_tx
                         .send(Ok(ClientEvent {
-                            payload: Some(Payload::Response(WorkerResponse { request_id, value })),
+                            payload: Some(Payload::Response(WorkerResponse { request_id, record })),
                         }))
                         .await
                     {

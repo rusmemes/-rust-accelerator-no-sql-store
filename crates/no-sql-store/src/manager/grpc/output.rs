@@ -6,7 +6,7 @@ use crate::{
         common::v1::{Addr, ClusterState as GrpcClusterState, GetState, Node},
         domain_node_type_to_grpc,
         domain_partitions_to_grpc,
-        manager_api::v1::{Heartbeat as GrpcHeartbeat, Leader as GrpcLeader, ManagerEvent, RemovePartitionFromReplica, VoteRequest as GrpcVoteRequest, VoteResponse as GrpcVoteResponse, WorkerEvent, manager_event::Payload, worker_event},
+        manager_api::v1::{ClientEvent, Heartbeat as GrpcHeartbeat, Leader as GrpcLeader, ManagerEvent, RemovePartitionFromReplica, VoteRequest as GrpcVoteRequest, VoteResponse as GrpcVoteResponse, WorkerEvent, manager_event::Payload, worker_event},
     },
     manager::{
         domain::ManagerProtocol,
@@ -24,6 +24,7 @@ pub(super) async fn output(
     mut rx: Receiver<ManagerProtocol>,
     manager_sessions: Arc<RwLock<HashMap<NodeId, ManagerIOStream>>>,
     worker_sessions: Arc<RwLock<HashMap<NodeId, WorkerIOStream>>>,
+    client_sessions: Arc<RwLock<HashMap<NodeId, Sender<Result<ClientEvent, tonic::Status>>>>>,
     config: Arc<RwLock<Config>>,
 ) {
     while let Some(message) = rx.recv().await {
@@ -89,6 +90,7 @@ pub(super) async fn output(
                     &tx,
                     &manager_sessions,
                     &worker_sessions,
+                    &client_sessions,
                     recipient_id,
                     epoch,
                     leader_id,
@@ -138,7 +140,7 @@ pub(super) async fn handle_output_leader(
             },
             tx,
             worker_sessions,
-            id,
+            id.clone(),
         )
         .await
     } else {
@@ -149,7 +151,7 @@ pub(super) async fn handle_output_leader(
             },
             tx,
             manager_sessions,
-            id,
+            id.clone(),
         )
         .await
     }
@@ -200,6 +202,7 @@ pub(super) async fn handle_output_cluster_state(
     tx: &Sender<ManagerProtocol>,
     manager_sessions: &RwLock<HashMap<NodeId, ManagerIOStream>>,
     worker_sessions: &RwLock<HashMap<NodeId, WorkerIOStream>>,
+    client_sessions: &RwLock<HashMap<NodeId, Sender<Result<ClientEvent, tonic::Status>>>>,
     id: NodeId,
     epoch: u64,
     leader_id: NodeId,
@@ -209,7 +212,7 @@ pub(super) async fn handle_output_cluster_state(
     let state = || GrpcClusterState {
         epoch,
         leader_id: leader_id.to_string(),
-        nodes: items
+        nodes: items.clone()
             .into_iter()
             .map(
                 |ClusterNode {
@@ -226,11 +229,16 @@ pub(super) async fn handle_output_cluster_state(
                 },
             )
             .collect(),
-        partitions: Some(domain_partitions_to_grpc(partitions)),
+        partitions: Some(domain_partitions_to_grpc(partitions.clone())),
     };
 
-    let is_worker = worker_sessions.read().await.contains_key(&id);
-    if is_worker {
+    if let Some(sender) = client_sessions.read().await.get(&id).cloned() {
+        let _ = sender
+            .send(Ok(ClientEvent {
+                cluster_state: Some(state()),
+            }))
+            .await;
+    } else if worker_sessions.read().await.contains_key(&id) {
         handle_common(
             "ClusterState",
             || WorkerEvent {
@@ -238,7 +246,7 @@ pub(super) async fn handle_output_cluster_state(
             },
             tx,
             worker_sessions,
-            id,
+            id.clone(),
         )
         .await;
     } else {
@@ -249,9 +257,23 @@ pub(super) async fn handle_output_cluster_state(
             },
             tx,
             manager_sessions,
-            id,
+            id.clone(),
         )
         .await;
+    }
+
+    let clients = client_sessions.read().await.clone();
+    for (client_id, sender) in clients {
+        if client_id != id
+            && sender
+                .send(Ok(ClientEvent {
+                    cluster_state: Some(state()),
+                }))
+                .await
+                .is_err()
+        {
+            client_sessions.write().await.remove(&client_id);
+        }
     }
 }
 
