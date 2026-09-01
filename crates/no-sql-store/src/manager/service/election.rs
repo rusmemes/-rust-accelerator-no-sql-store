@@ -1,4 +1,4 @@
-use super::{get_random_number, Node, State};
+use super::{Node, State, get_random_number};
 use crate::common::{Me, NodeId, NodeType};
 use crate::manager::domain::ManagerProtocol;
 use std::cmp::max;

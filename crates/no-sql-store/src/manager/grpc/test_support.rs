@@ -3,8 +3,8 @@ use crate::common::{Me, NodeId};
 use crate::conversions::manager_api::v1::{ManagerEvent, WorkerEvent};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{Receiver, Sender};
 
 pub(super) fn node_id(id: &str) -> NodeId {
     NodeId::from_string(id)

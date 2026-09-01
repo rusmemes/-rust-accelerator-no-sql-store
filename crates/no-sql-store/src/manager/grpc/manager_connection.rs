@@ -3,25 +3,25 @@ use crate::{
     conversions::{
         common::v1::Addr,
         manager_api::v1::{
-            manager_api_client::ManagerApiClient,
-            manager_event::Payload,
             Config,
             Connect,
             ConnectResponse,
             ManagerEvent
-        }
+            ,
+            manager_api_client::ManagerApiClient,
+            manager_event::Payload},
     },
     manager::{
         domain::ManagerProtocol,
-        grpc::input::input_from_manager,
-        grpc::session::{IOStreamExt, ManagerIOStream},
         grpc::GRPC_CONNECTION_CHANNEL_BUFFER_SIZE
-    }
+        ,
+        grpc::input::input_from_manager,
+        grpc::session::{IOStreamExt, ManagerIOStream}},
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Streaming};
 

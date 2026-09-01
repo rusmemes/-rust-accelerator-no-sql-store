@@ -4,8 +4,8 @@ use crate::manager::domain::ManagerProtocol;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
-use tokio::sync::mpsc::Sender;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::Sender;
 use tonic::Status;
 
 pub(super) type ManagerIOStream =

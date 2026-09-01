@@ -10,7 +10,7 @@ use crate::manager::grpc::start_server;
 use crate::manager::service::start_service;
 use std::sync::Arc;
 use tokio::select;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 

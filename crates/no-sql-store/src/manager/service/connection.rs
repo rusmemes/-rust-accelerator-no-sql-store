@@ -1,17 +1,20 @@
-use crate::common::{now_millis, Me, Node, NodeId, NodeType};
-use crate::worker::domain::WorkerProtocol;
-use crate::worker::service::state::State;
+use super::{Node, State};
+use crate::common::{Me, NodeId, NodeType, now_millis};
+use crate::manager::domain::ManagerProtocol;
 
 pub(super) fn handle_node_disconnected(state: &mut State, id: NodeId, me: &Me) {
     if let Some(_) = state.nodes.remove(&id) {
         tracing::info!("Node disconnected: {:?}", id);
+        if Some(id) == state.elected_leader_id || state.nodes.len() == 1 {
+            state.elected_leader_id = None;
+        }
         tracing::info!("Me: {:?}", me);
         tracing::info!("State: {:?}", state);
     }
 }
 
 pub(super) fn handle_new_connection(
-    output: &mut Vec<WorkerProtocol>,
+    output: &mut Vec<ManagerProtocol>,
     state: &mut State,
     id: Option<NodeId>,
     host: String,
@@ -24,7 +27,11 @@ pub(super) fn handle_new_connection(
         state.nodes.insert(
             id.clone(),
             if manager {
-                output.push(WorkerProtocol::GetClusterState { id });
+                if state.elected_leader_id.is_none()
+                    || state.elected_leader_id.as_ref() != Some(&me.id)
+                {
+                    output.push(ManagerProtocol::GetClusterState { id });
+                }
                 Node {
                     host,
                     port,
@@ -44,3 +51,6 @@ pub(super) fn handle_new_connection(
         tracing::info!("State: {:?}", state);
     }
 }
+
+#[cfg(test)]
+mod tests;

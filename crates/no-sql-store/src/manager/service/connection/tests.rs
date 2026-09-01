@@ -1,8 +1,8 @@
 use super::*;
 use crate::common::now_millis;
 use crate::manager::domain::ManagerProtocol;
-use crate::manager::service::test_support::*;
 use crate::manager::service::State;
+use crate::manager::service::test_support::*;
 use std::collections::HashMap;
 
 #[tokio::test]

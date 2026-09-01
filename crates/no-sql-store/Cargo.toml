@@ -1,0 +1,25 @@
+[package]
+name = "no-sql-store"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.103"
+tokio-util = "0.7.18"
+async-trait = "0.1.89"
+tokio = { version = "1.49.0", features = ["full"] }
+tokio-stream = "0.1.18"
+clap = { version = "4.5.60", features = ["derive", "string"] }
+clap_derive = "4.5.55"
+tonic = "0.14.5"
+prost = "0.14.3"
+tonic-prost = "0.14.5"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.22"
+uuid = { version = "1.23.4", features = ['v7', 'v4'] }
+rand = "0.10.2"
+dashmap = "6.2.1"
+crossbeam-skiplist = "0.1"
+
+[build-dependencies]
+tonic-prost-build = "0.14.5"
