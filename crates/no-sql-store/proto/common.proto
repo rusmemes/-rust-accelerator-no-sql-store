@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package common.v1;
+
+message GetState {}
+
+message Addr {
+  string host = 1;
+  uint32 port = 2;
+}
+
+enum NodeType {
+  Manager = 0;
+  Worker = 1;
+}
+
+message Partitions {
+  map<uint32, Partition> mapping = 1;
+  map<uint32, Replicas> new_replicas = 2;
+  map<uint32, Replicas> old_replicas = 3;
+}
+
+message Partition {
+  string master = 1;
+  repeated string replicas = 2;
+}
+
+message Replicas {
+  repeated string replicas = 1;
+}
+
+message Node {
+  string id = 1;
+  Addr addr = 2;
+  uint64 last_heartbeat = 3;
+  NodeType node_type = 4;
+}
+
+message ClusterState {
+  uint64 epoch = 1;
+  string leader_id = 2;
+  repeated Node nodes = 3;
+  Partitions partitions = 4;
+}
