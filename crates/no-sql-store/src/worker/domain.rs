@@ -56,4 +56,5 @@ pub struct Record {
     pub value: Vec<u8>,
     pub ttl: u64,
     pub creation_time_ms: u64,
+    pub deleted: bool,
 }

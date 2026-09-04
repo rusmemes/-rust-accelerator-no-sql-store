@@ -42,7 +42,13 @@ pub(super) async fn output(
                 recipient_id,
                 partition_id_to_max_applied_key,
             } => {
-                handle_sync_batch_response(&tx, &worker_sessions, recipient_id, partition_id_to_max_applied_key).await;
+                handle_sync_batch_response(
+                    &tx,
+                    &worker_sessions,
+                    recipient_id,
+                    partition_id_to_max_applied_key,
+                )
+                .await;
             }
             WorkerProtocol::SyncBatch {
                 recipient_id,
@@ -116,6 +122,7 @@ async fn handle_sync_batch(
                         value: r.value.clone(),
                         ttl: r.ttl,
                         creation_time: r.creation_time_ms,
+                        deleted: r.deleted,
                     })
                     .collect(),
             })),

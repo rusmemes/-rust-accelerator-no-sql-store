@@ -63,6 +63,7 @@ pub(super) async fn input_from_worker<S>(
                                         value: r.value.clone(),
                                         ttl: r.ttl,
                                         creation_time_ms: r.creation_time,
+                                        deleted: r.deleted,
                                     })
                                     .collect(),
                             }),

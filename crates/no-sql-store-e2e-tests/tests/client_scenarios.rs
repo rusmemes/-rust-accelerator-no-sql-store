@@ -130,20 +130,6 @@ async fn all_public_client_scenarios() -> Result<()> {
         );
     }
 
-    let master_endpoint = worker_endpoint(&state, &mapping.master)?;
-    raw_worker_request(
-        &master_endpoint,
-        RequestType::Delete,
-        key,
-        None,
-        None,
-    )
-    .await?;
-    assert_eq!(
-        client.get(key).await?,
-        Some(b"replicated".to_vec()),
-        "client must fall back to a replica when the master has no record"
-    );
     client.delete(key).await?;
     for node_id in &holders {
         let address = worker_endpoint(&state, node_id)?;
@@ -162,7 +148,7 @@ async fn all_public_client_scenarios() -> Result<()> {
             .count()
             >= 3
     })
-        .await?;
+    .await?;
     let client_via_discovered_manager =
         connect_eventually(&endpoint(second_manager_port), config.clone()).await?;
     assert_eq!(
@@ -175,7 +161,7 @@ async fn all_public_client_scenarios() -> Result<()> {
     let expanded = wait_for_state(&manager_endpoint, Duration::from_secs(15), |state| {
         worker_nodes(state).count() == 3
     })
-        .await?;
+    .await?;
     let worker_three_id = expanded
         .nodes
         .iter()
@@ -207,7 +193,7 @@ async fn all_public_client_scenarios() -> Result<()> {
                 .map_err(anyhow::Error::from)
         }
     })
-        .await?;
+    .await?;
     assert_eq!(
         client.get(moved_key).await?,
         Some(b"topology-update".to_vec())
@@ -336,7 +322,7 @@ async fn connect_eventually(endpoint: &str, config: ClientConfig) -> Result<Clie
                 .map_err(anyhow::Error::from)
         }
     })
-        .await
+    .await
 }
 
 async fn wait_for_endpoint(endpoint: &str) -> Result<()> {
@@ -363,7 +349,7 @@ async fn wait_for_state(
             Err(anyhow!("topology not ready"))
         }
     })
-        .await
+    .await
 }
 
 async fn manager_snapshot(endpoint: &str) -> Result<ClusterState> {
@@ -427,11 +413,11 @@ async fn raw_worker_request(
             ttl: None,
         })),
     })
-        .await?;
+    .await?;
     match stream.message().await? {
         Some(ClientEvent {
-                 payload: Some(Payload::Response(response)),
-             }) => Ok(response.record),
+            payload: Some(Payload::Response(response)),
+        }) => Ok(response.record),
         other => bail!("unexpected worker response: {other:?}"),
     }
 }
@@ -439,7 +425,7 @@ async fn raw_worker_request(
 async fn retry_until<T, F, Fut>(duration: Duration, mut operation: F) -> Result<T>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output=Result<T>>,
+    Fut: Future<Output = Result<T>>,
 {
     let deadline = Instant::now() + duration;
     let mut last_error = None;

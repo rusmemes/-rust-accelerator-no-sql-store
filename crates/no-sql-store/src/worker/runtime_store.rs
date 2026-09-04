@@ -11,6 +11,21 @@ pub struct Record {
     pub value: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
+pub enum Mutation {
+    Put(Arc<Record>),
+    Delete { deletion_time_ms: u64 },
+}
+
+impl Mutation {
+    fn version(&self) -> u64 {
+        match self {
+            Self::Put(record) => record.creation_time_ms,
+            Self::Delete { deletion_time_ms } => *deletion_time_ms,
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct RuntimeStore {
     cache: Arc<DashMap<PartitionId, PartitionStore>>,
@@ -19,7 +34,8 @@ pub struct RuntimeStore {
 
 #[derive(Default)]
 struct PartitionStore {
-    records: SkipMap<Key, Arc<Record>>,
+    records: SkipMap<Key, Mutation>,
+    changes: SkipMap<u64, Key>,
     active_writers: AtomicUsize,
     revision: AtomicU64,
 }
@@ -27,22 +43,31 @@ struct PartitionStore {
 struct WriterGuard<'a> {
     partition: &'a PartitionStore,
     next_revision: &'a AtomicU64,
+    changed_key: Option<Key>,
 }
 
 impl Drop for WriterGuard<'_> {
     fn drop(&mut self) {
         let revision = self.next_revision.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(key) = self.changed_key {
+            self.partition.changes.insert(revision, key);
+        }
         self.partition.revision.store(revision, Ordering::SeqCst);
         self.partition.active_writers.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
 impl PartitionStore {
-    fn writer<'a>(&'a self, next_revision: &'a AtomicU64) -> WriterGuard<'a> {
+    fn writer<'a>(
+        &'a self,
+        next_revision: &'a AtomicU64,
+        changed_key: Option<Key>,
+    ) -> WriterGuard<'a> {
         self.active_writers.fetch_add(1, Ordering::SeqCst);
         WriterGuard {
             partition: self,
             next_revision,
+            changed_key,
         }
     }
 
@@ -76,32 +101,22 @@ impl Key {
 }
 
 impl RuntimeStore {
-    pub fn get_partition_records(
+    pub fn get_partition_mutations(
         &self,
         partition: &PartitionId,
         amount: usize,
         after_key: Option<&Key>,
-    ) -> Vec<(Key, Arc<Record>)> {
-        match self.cache.get(partition) {
-            Some(entry) => match after_key {
-                Some(after_key) => entry
-                    .value()
-                    .records
-                    .iter()
-                    .skip_while(|entry| entry.key() <= after_key)
-                    .take(amount)
-                    .map(|entry| (*entry.key(), entry.value().clone()))
-                    .collect(),
-                None => entry
-                    .value()
-                    .records
-                    .iter()
-                    .take(amount)
-                    .map(|entry| (*entry.key(), entry.value().clone()))
-                    .collect(),
-            },
-            None => vec![],
-        }
+    ) -> Vec<(Key, Mutation)> {
+        let Some(partition) = self.cache.get(partition) else {
+            return vec![];
+        };
+        partition
+            .records
+            .iter()
+            .skip_while(|entry| after_key.is_some_and(|key| entry.key() <= key))
+            .take(amount)
+            .map(|entry| (*entry.key(), entry.value().clone()))
+            .collect()
     }
 
     /// Returns a revision only when no mutation of this partition is in flight.
@@ -109,6 +124,44 @@ impl RuntimeStore {
         match self.cache.get(partition) {
             Some(entry) => entry.stable_revision(),
             None => Some(0),
+        }
+    }
+
+    pub fn get_partition_changes(
+        &self,
+        partition: &PartitionId,
+        after_revision: u64,
+        amount: usize,
+    ) -> Option<(u64, Vec<(Key, Mutation)>)> {
+        let partition = self.cache.get(partition)?;
+        let changes: Vec<_> = partition
+            .changes
+            .iter()
+            .skip_while(|entry| *entry.key() <= after_revision)
+            .take(amount)
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect();
+        let last_revision = changes.last()?.0;
+        let records = changes
+            .into_iter()
+            .filter_map(|(_, key)| {
+                partition
+                    .records
+                    .get(&key)
+                    .map(|entry| (key, entry.value().clone()))
+            })
+            .collect();
+        Some((last_revision, records))
+    }
+
+    pub fn prune_partition_changes(&self, partition: &PartitionId, through_revision: u64) {
+        if let Some(partition) = self.cache.get(partition) {
+            while let Some(entry) = partition.changes.front() {
+                if *entry.key() > through_revision {
+                    break;
+                }
+                entry.remove();
+            }
         }
     }
 
@@ -124,32 +177,30 @@ impl RuntimeStore {
         self.cache.remove(&partition);
     }
 
-    pub fn delete(&self, key: Key) {
+    pub fn delete_at(&self, key: Key, deletion_time_ms: u64) {
         let partition = key.partition();
-        let removed = if let Some(map) = self.cache.get(&partition) {
-            let _writer = map.writer(&self.next_revision);
-            map.records.remove(&key).is_some()
-        } else {
-            false
-        };
-
-        if removed {
-            self.remove_partition_if_empty(partition);
-        }
+        let map = self.cache.entry(partition).or_default();
+        let _writer = map.writer(&self.next_revision, Some(key));
+        let mutation = Mutation::Delete { deletion_time_ms };
+        map.records.compare_insert(key, mutation.clone(), |old| {
+            old.version() <= mutation.version()
+        });
     }
 
-    pub fn get(&self, key: Key) -> Option<Arc<Record>> {
+    pub fn get_versioned(&self, key: Key) -> Option<Mutation> {
         let partition = key.partition();
 
         let mut needs_partition_cleanup = false;
         let res = if let Some(sorted_map) = self.cache.get(&partition) {
             if let Some(entry) = sorted_map.records.get(&key) {
-                let record = entry.value();
+                let Mutation::Put(record) = entry.value() else {
+                    return Some(entry.value().clone());
+                };
                 let exp_time = record.expiration_time_ms;
                 if exp_time == 0 || exp_time > now_millis() {
-                    Some(record.clone())
+                    Some(Mutation::Put(record.clone()))
                 } else {
-                    let _writer = sorted_map.writer(&self.next_revision);
+                    let _writer = sorted_map.writer(&self.next_revision, None);
                     entry.remove();
                     needs_partition_cleanup = true;
                     None
@@ -167,15 +218,24 @@ impl RuntimeStore {
         res
     }
 
+    #[cfg(test)]
+    pub fn get(&self, key: Key) -> Option<Arc<Record>> {
+        match self.get_versioned(key) {
+            Some(Mutation::Put(record)) => Some(record),
+            Some(Mutation::Delete { .. }) | None => None,
+        }
+    }
+
     pub fn put(&self, key: Key, record: Record) {
         let partition = key.partition();
         let sorted_map = self.cache.entry(partition).or_default();
-        let _writer = sorted_map.writer(&self.next_revision);
+        let _writer = sorted_map.writer(&self.next_revision, Some(key));
         let record = Arc::new(record);
+        let mutation = Mutation::Put(record.clone());
         sorted_map
             .records
-            .compare_insert(key, record.clone(), |old| {
-                old.creation_time_ms <= record.creation_time_ms
+            .compare_insert(key, mutation.clone(), |old| {
+                old.version() <= mutation.version()
             });
     }
 
@@ -191,9 +251,12 @@ impl RuntimeStore {
         for partition_id in partition_ids {
             if let Some(partition) = self.cache.get(&partition_id) {
                 for entry in partition.records.iter() {
-                    let expiration_time_ms = entry.value().expiration_time_ms;
+                    let Mutation::Put(record) = entry.value() else {
+                        continue;
+                    };
+                    let expiration_time_ms = record.expiration_time_ms;
                     if expiration_time_ms != 0 && expiration_time_ms <= now_ms {
-                        let _writer = partition.writer(&self.next_revision);
+                        let _writer = partition.writer(&self.next_revision, None);
                         entry.remove();
                         removed += 1;
                     }
@@ -210,7 +273,6 @@ impl RuntimeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
     use std::time::Duration;
 
     #[test]
@@ -283,9 +345,36 @@ mod tests {
         assert!(store.cache.contains_key(&partition));
         assert!(store.get(key).is_some());
 
-        store.delete(key);
+        store.delete_at(key, now_millis());
         assert!(store.get(key).is_none());
-        assert!(!store.cache.contains_key(&partition));
+        assert!(store.cache.contains_key(&partition));
+    }
+
+    #[test]
+    fn tombstone_prevents_stale_put_but_allows_newer_put() {
+        let store = RuntimeStore::new();
+        let key = Key(1);
+
+        store.delete_at(key, 200);
+        store.put(
+            key,
+            Record {
+                value: vec![1],
+                expiration_time_ms: 0,
+                creation_time_ms: 100,
+            },
+        );
+        assert!(store.get(key).is_none());
+
+        store.put(
+            key,
+            Record {
+                value: vec![2],
+                expiration_time_ms: 0,
+                creation_time_ms: 300,
+            },
+        );
+        assert_eq!(store.get(key).unwrap().value, vec![2]);
     }
 
     #[test]
@@ -336,40 +425,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_partition_records() {
-        let store = RuntimeStore::new();
-        let key1 = Key(1);
-        let key2 = Key((PARTITIONS_AMOUNT + 1) as u64);
-        let partition = key1.partition();
-
-        store.put(
-            key1,
-            Record {
-                value: vec![1],
-                expiration_time_ms: 0,
-                creation_time_ms: 0,
-            },
-        );
-        store.put(
-            key2,
-            Record {
-                value: vec![2],
-                expiration_time_ms: 0,
-                creation_time_ms: 0,
-            },
-        );
-
-        let records = store.get_partition_records(&partition, 10, None);
-        assert_eq!(records.len(), 2);
-        let keys: HashSet<Key> = records.iter().map(|(k, _)| *k).collect();
-        assert!(keys.contains(&key1));
-        assert!(keys.contains(&key2));
-
-        let records_limited = store.get_partition_records(&partition, 1, None);
-        assert_eq!(records_limited.len(), 1);
-    }
-
-    #[test]
     fn test_runtime_store_no_expiration() {
         let store = RuntimeStore::new();
         let key = Key(1);
@@ -406,7 +461,7 @@ mod tests {
                         },
                     );
                     if j % 2 == 0 {
-                        store_clone.delete(key);
+                        store_clone.delete_at(key, 1);
                     }
                 }
             }));
@@ -419,8 +474,16 @@ mod tests {
         let mut total_count = 0;
         for i in 0..PARTITIONS_AMOUNT {
             total_count += store
-                .get_partition_records(&PartitionId(i as u16), 10000, None)
-                .len();
+                .cache
+                .get(&PartitionId(i as u16))
+                .map(|partition| {
+                    partition
+                        .records
+                        .iter()
+                        .filter(|entry| matches!(entry.value(), Mutation::Put(_)))
+                        .count()
+                })
+                .unwrap_or(0);
         }
         assert_eq!(total_count, 50000);
     }

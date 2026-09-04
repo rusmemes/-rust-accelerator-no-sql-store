@@ -4,9 +4,9 @@ mod output;
 mod session;
 mod worker_connection;
 
-use crate::worker::runtime_store::{Key, Record};
+use crate::worker::runtime_store::{Key, Mutation, Record};
 use crate::{
-    common::{CommunicationStreamEither, Me, NodeId},
+    common::{CommunicationStreamEither, Me, NodeId, now_millis},
     conversions::{
         common::v1::Addr,
         worker_api::v1::{
@@ -96,7 +96,7 @@ impl WorkerApi for WorkerApiService {
                     payload: Some(Payload::Request(request)),
                 } = event
                 {
-                    let (request_id, record) = match request {
+                    let (request_id, record, deletion_time) = match request {
                         ClientRequest {
                             id,
                             request_type,
@@ -110,35 +110,50 @@ impl WorkerApi for WorkerApiService {
                                 expiration_time_ms: ttl.unwrap_or(0),
                                 creation_time_ms
                             });
-                            (id, None)
+                            (id, None, None)
                         },
                         ClientRequest {
                             id,
                             request_type,
                             key,
+                            creation_time,
                             ..
                         } if request_type == RequestType::Delete as i32 => {
-                            runtime_store.delete(Key(key));
-                            (id, None)
+                            runtime_store.delete_at(
+                                Key(key),
+                                creation_time.unwrap_or_else(now_millis),
+                            );
+                            (id, None, None)
                         },
                         ClientRequest {
                             id,
                             key,
                             ..
                         } /* considered as Get request */ => {
-                            let option = runtime_store.get(Key(key));
-                            (id, option.map(|record| crate::conversions::worker_api::v1::Record {
-                                key,
-                                value: record.value.clone(),
-                                ttl: record.expiration_time_ms,
-                                creation_time: record.creation_time_ms,
-                            }))
+                            let option = runtime_store.get_versioned(Key(key));
+                            match option {
+                                Some(Mutation::Put(record)) => (id, Some(crate::conversions::worker_api::v1::Record {
+                                    key,
+                                    value: record.value.clone(),
+                                    ttl: record.expiration_time_ms,
+                                    creation_time: record.creation_time_ms,
+                                    deleted: false,
+                                }), None),
+                                Some(Mutation::Delete { deletion_time_ms }) => {
+                                    (id, None, Some(deletion_time_ms))
+                                }
+                                None => (id, None, None),
+                            }
                         },
                     };
 
                     if let Err(e) = grpc_tx
                         .send(Ok(ClientEvent {
-                            payload: Some(Payload::Response(WorkerResponse { request_id, record })),
+                            payload: Some(Payload::Response(WorkerResponse {
+                                request_id,
+                                record,
+                                deletion_time,
+                            })),
                         }))
                         .await
                     {

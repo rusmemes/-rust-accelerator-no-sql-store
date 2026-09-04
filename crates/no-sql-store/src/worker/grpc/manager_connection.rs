@@ -3,12 +3,9 @@ use crate::{
     conversions::{
         common::v1::Addr,
         manager_api::v1::{
-            Connect,
-            ConnectResponse,
-            WorkerEvent
-            ,
-            manager_api_client::ManagerApiClient,
-            worker_event::Payload},
+            Connect, ConnectResponse, WorkerEvent, manager_api_client::ManagerApiClient,
+            worker_event::Payload,
+        },
     },
     worker::grpc::input::input_from_manager,
     worker::{

@@ -217,7 +217,7 @@ impl Client {
             .request_with_retry(&primary, request(RequestType::Get, key, None, None, None))
             .await?
         {
-            return Ok(Some(record.value));
+            return Ok((!record.deleted).then_some(record.value));
         }
         if fallback.is_empty() {
             return Ok(None);
@@ -251,7 +251,7 @@ impl Client {
             }
         }
         if successful {
-            Ok(newest.map(|record| record.value))
+            Ok(newest.and_then(|record| (!record.deleted).then_some(record.value)))
         } else {
             Err(last_error.unwrap_or(Error::Timeout))
         }
@@ -289,8 +289,12 @@ impl Client {
 
     pub async fn delete(&self, key: impl StoreKey) -> Result<(), Error> {
         let key = key.to_store_key();
+        let deletion_time = now_millis()?;
         self.inner
-            .write_all(key, request(RequestType::Delete, key, None, None, None))
+            .write_all(
+                key,
+                request(RequestType::Delete, key, None, Some(deletion_time), None),
+            )
             .await
     }
 }

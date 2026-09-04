@@ -39,7 +39,16 @@ impl WorkerConnection {
                         if let Some(sender) =
                             response_pending.lock().await.remove(&response.request_id)
                         {
-                            let _ = sender.send(Ok(response.record));
+                            let record = response.record.or_else(|| {
+                                response.deletion_time.map(|deletion_time| Record {
+                                    key: 0,
+                                    value: vec![],
+                                    ttl: 0,
+                                    creation_time: deletion_time,
+                                    deleted: true,
+                                })
+                            });
+                            let _ = sender.send(Ok(record));
                         }
                     }
                     Ok(Some(_)) => {}

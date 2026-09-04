@@ -1,7 +1,7 @@
 use crate::common::{Me, Node, NodeId, PARTITIONS_AMOUNT, PartitionId, Partitions, now_millis};
 use crate::worker::domain::{SyncBatchRequest, WorkerProtocol};
-use crate::worker::runtime_store::{Key, RuntimeStore};
-use crate::worker::service::state::{State, SyncState};
+use crate::worker::runtime_store::{Key, Mutation, RuntimeStore};
+use crate::worker::service::state::{State, SyncPhase, SyncState};
 use crate::worker::{domain, runtime_store};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -93,6 +93,24 @@ fn sync_partition(
 
     if let Some(recipient_states) = state.sync.get_mut(&partition_id) {
         recipient_states.retain(|_, sync_state| !sync_state.confirmed);
+
+        let prune_through = recipient_states
+            .values()
+            .map(|sync_state| match sync_state.phase {
+                SyncPhase::Snapshot { revision } => revision,
+                SyncPhase::Changes {
+                    confirmed_revision, ..
+                } => confirmed_revision,
+            })
+            .min()
+            .or_else(|| runtime_store.stable_partition_revision(&partition_id));
+        if let Some(prune_through) = prune_through {
+            runtime_store.prune_partition_changes(&partition_id, prune_through);
+        }
+    } else if let Some(revision) = runtime_store.stable_partition_revision(&partition_id) {
+        // No migration currently needs the journal. A later migration starts
+        // from a fresh snapshot and therefore does not need these entries.
+        runtime_store.prune_partition_changes(&partition_id, revision);
     }
 }
 
@@ -157,7 +175,9 @@ fn start_sync(
             SyncState {
                 prev_max_key: None,
                 curr_max_key,
-                start_revision,
+                phase: SyncPhase::Snapshot {
+                    revision: start_revision,
+                },
                 confirmed: false,
                 last_start_time: now_millis(),
             },
@@ -176,59 +196,77 @@ fn continue_confirmed_sync(
     partition_id: PartitionId,
     recipient_id: &NodeId,
 ) -> bool {
-    if let Some(new_max_key) = sync_batch(
-        output,
-        runtime_store,
-        recipient_id,
-        &partition_id,
-        Some(&sync_state.curr_max_key),
-        me,
-    ) {
-        sync_state.prev_max_key = Some(sync_state.curr_max_key);
-        sync_state.curr_max_key = new_max_key;
-        sync_state.confirmed = false;
-        sync_state.last_start_time = now_millis();
-        false
-    } else {
-        if runtime_store.stable_partition_revision(&partition_id) == Some(sync_state.start_revision)
-        {
-            sync_state.confirmed = true;
-            true
-        } else {
-            restart_changed_sync(
-                sync_state,
+    match sync_state.phase {
+        SyncPhase::Snapshot { revision } => {
+            if let Some(new_max_key) = sync_batch(
                 output,
                 runtime_store,
-                me,
-                partition_id,
                 recipient_id,
-            )
+                &partition_id,
+                Some(&sync_state.curr_max_key),
+                me,
+            ) {
+                sync_state.prev_max_key = Some(sync_state.curr_max_key);
+                sync_state.curr_max_key = new_max_key;
+                sync_state.confirmed = false;
+                sync_state.last_start_time = now_millis();
+                false
+            } else {
+                continue_changes(
+                    sync_state,
+                    output,
+                    runtime_store,
+                    me,
+                    partition_id,
+                    recipient_id,
+                    revision,
+                )
+            }
         }
+        SyncPhase::Changes {
+            pending_revision, ..
+        } => continue_changes(
+            sync_state,
+            output,
+            runtime_store,
+            me,
+            partition_id,
+            recipient_id,
+            pending_revision,
+        ),
     }
 }
 
-fn restart_changed_sync(
+fn continue_changes(
     sync_state: &mut SyncState,
     output: &mut Vec<WorkerProtocol>,
     runtime_store: &RuntimeStore,
     me: &Me,
     partition_id: PartitionId,
     recipient_id: &NodeId,
+    confirmed_revision: u64,
 ) -> bool {
-    let Some(start_revision) = runtime_store.stable_partition_revision(&partition_id) else {
-        return false;
-    };
-
-    if let Some(curr_max_key) =
-        sync_batch(output, runtime_store, recipient_id, &partition_id, None, me)
-    {
+    if let Some((pending_revision, curr_max_key)) = sync_change_batch(
+        output,
+        runtime_store,
+        recipient_id,
+        &partition_id,
+        confirmed_revision,
+        me,
+    ) {
         sync_state.prev_max_key = None;
         sync_state.curr_max_key = curr_max_key;
-        sync_state.start_revision = start_revision;
+        sync_state.phase = SyncPhase::Changes {
+            confirmed_revision,
+            pending_revision,
+        };
         sync_state.confirmed = false;
         sync_state.last_start_time = now_millis();
         false
-    } else if runtime_store.stable_partition_revision(&partition_id) == Some(start_revision) {
+    } else if runtime_store
+        .stable_partition_revision(&partition_id)
+        .is_some()
+    {
         sync_state.confirmed = true;
         true
     } else {
@@ -248,14 +286,29 @@ fn retry_timed_out_sync(
         return;
     }
 
-    if let Some(new_max_key) = sync_batch(
-        output,
-        runtime_store,
-        recipient_id,
-        &partition_id,
-        sync_state.prev_max_key.as_ref(),
-        me,
-    ) {
+    let retried = match sync_state.phase {
+        SyncPhase::Snapshot { .. } => sync_batch(
+            output,
+            runtime_store,
+            recipient_id,
+            &partition_id,
+            sync_state.prev_max_key.as_ref(),
+            me,
+        ),
+        SyncPhase::Changes {
+            confirmed_revision, ..
+        } => sync_change_batch(
+            output,
+            runtime_store,
+            recipient_id,
+            &partition_id,
+            confirmed_revision,
+            me,
+        )
+        .map(|(_, key)| key),
+    };
+
+    if let Some(new_max_key) = retried {
         sync_state.curr_max_key = new_max_key;
         sync_state.confirmed = false;
         sync_state.last_start_time = now_millis();
@@ -324,7 +377,7 @@ fn sync_batch(
     me: &Me,
 ) -> Option<Key> {
     const SYNC_BATCH_SIZE: usize = 1000;
-    let vec = runtime_store.get_partition_records(partition, SYNC_BATCH_SIZE, after_key);
+    let vec = runtime_store.get_partition_mutations(partition, SYNC_BATCH_SIZE, after_key);
     if vec.is_empty() {
         None
     } else {
@@ -335,16 +388,63 @@ fn sync_batch(
                 sender_id: me.id.clone(),
                 records: vec
                     .into_iter()
-                    .map(|(k, r)| domain::Record {
-                        key: k.clone(),
-                        value: r.value.clone(),
-                        ttl: r.expiration_time_ms,
-                        creation_time_ms: r.creation_time_ms,
-                    })
+                    .map(|(key, mutation)| mutation_to_domain(key, mutation))
                     .collect(),
             }),
         });
         max_last_key
+    }
+}
+
+fn sync_change_batch(
+    output: &mut Vec<WorkerProtocol>,
+    runtime_store: &RuntimeStore,
+    recipient: &NodeId,
+    partition: &PartitionId,
+    after_revision: u64,
+    me: &Me,
+) -> Option<(u64, Key)> {
+    const SYNC_BATCH_SIZE: usize = 1000;
+    let mut cursor = after_revision;
+    let (last_revision, records) = loop {
+        let (last_revision, records) =
+            runtime_store.get_partition_changes(partition, cursor, SYNC_BATCH_SIZE)?;
+        if !records.is_empty() {
+            break (last_revision, records);
+        }
+        cursor = last_revision;
+    };
+
+    let max_key = records.iter().map(|(key, _)| *key).max()?;
+    output.push(WorkerProtocol::SyncBatch {
+        recipient_id: recipient.clone(),
+        request: Arc::new(SyncBatchRequest {
+            sender_id: me.id.clone(),
+            records: records
+                .into_iter()
+                .map(|(key, mutation)| mutation_to_domain(key, mutation))
+                .collect(),
+        }),
+    });
+    Some((last_revision, max_key))
+}
+
+fn mutation_to_domain(key: Key, mutation: Mutation) -> domain::Record {
+    match mutation {
+        Mutation::Put(record) => domain::Record {
+            key,
+            value: record.value.clone(),
+            ttl: record.expiration_time_ms,
+            creation_time_ms: record.creation_time_ms,
+            deleted: false,
+        },
+        Mutation::Delete { deletion_time_ms } => domain::Record {
+            key,
+            value: vec![],
+            ttl: 0,
+            creation_time_ms: deletion_time_ms,
+            deleted: true,
+        },
     }
 }
 
@@ -406,14 +506,18 @@ pub fn handle_sync_batch(
     let mut partition_id_to_max_applied_key = HashMap::new();
 
     for record in &sync_batch_request.records {
-        runtime_store.put(
-            record.key,
-            runtime_store::Record {
-                value: record.value.clone(),
-                expiration_time_ms: record.ttl,
-                creation_time_ms: record.creation_time_ms,
-            },
-        );
+        if record.deleted {
+            runtime_store.delete_at(record.key, record.creation_time_ms);
+        } else {
+            runtime_store.put(
+                record.key,
+                runtime_store::Record {
+                    value: record.value.clone(),
+                    expiration_time_ms: record.ttl,
+                    creation_time_ms: record.creation_time_ms,
+                },
+            );
+        }
 
         match partition_id_to_max_applied_key.entry(record.key.partition()) {
             Entry::Occupied(mut occupied) => {
@@ -804,7 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn restarts_sync_when_a_new_key_would_fall_before_the_cursor() {
+    fn sends_behind_cursor_insert_from_change_log_without_restarting_snapshot() {
         let current = node_id(1);
         let new_replica = node_id(2);
         let partitions = Partitions {
@@ -832,6 +936,7 @@ mod tests {
         }
 
         let inserted_behind_cursor = Key(PARTITION.0 as u64 + partition_stride);
+        let first_snapshot_key = Key(PARTITION.0 as u64);
         let mut output = Vec::new();
         sync_partitions(&mut state, &mut output, &store, &me);
 
@@ -859,6 +964,7 @@ mod tests {
         );
 
         let mut transferred = false;
+        let mut resent_snapshot_start = false;
         for _ in 0..6 {
             output.clear();
             sync_partitions(&mut state, &mut output, &store, &me);
@@ -871,6 +977,10 @@ mod tests {
                             .records
                             .iter()
                             .any(|record| record.key == inserted_behind_cursor);
+                        resent_snapshot_start |= request
+                            .records
+                            .iter()
+                            .any(|record| record.key == first_snapshot_key);
                         request.records.last().map(|record| record.key)
                     }
                     _ => None,
@@ -886,5 +996,55 @@ mod tests {
         }
 
         assert!(transferred, "the behind-cursor insert must be resent");
+        assert!(
+            !resent_snapshot_start,
+            "the completed part of the snapshot must not be sent again"
+        );
+    }
+
+    #[test]
+    fn migrated_tombstone_prevents_stale_record_resurrection() {
+        let store = RuntimeStore::new();
+        let key = Key(PARTITION.0 as u64);
+        store.put(
+            key,
+            StoredRecord {
+                value: vec![1],
+                expiration_time_ms: 0,
+                creation_time_ms: 100,
+            },
+        );
+
+        let mut output = vec![];
+        handle_sync_batch(
+            &mut output,
+            &SyncBatchRequest {
+                sender_id: node_id(1),
+                records: vec![domain::Record {
+                    key,
+                    value: vec![],
+                    ttl: 0,
+                    creation_time_ms: 200,
+                    deleted: true,
+                }],
+            },
+            &store,
+        );
+        handle_sync_batch(
+            &mut output,
+            &SyncBatchRequest {
+                sender_id: node_id(1),
+                records: vec![domain::Record {
+                    key,
+                    value: vec![2],
+                    ttl: 0,
+                    creation_time_ms: 150,
+                    deleted: false,
+                }],
+            },
+            &store,
+        );
+
+        assert!(store.get(key).is_none());
     }
 }
