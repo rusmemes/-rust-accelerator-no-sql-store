@@ -54,6 +54,7 @@ impl State {
 pub struct SyncState {
     pub prev_max_key: Option<Key>,
     pub curr_max_key: Key,
+    pub start_revision: u64,
     pub confirmed: bool,
     pub last_start_time: u64,
 }

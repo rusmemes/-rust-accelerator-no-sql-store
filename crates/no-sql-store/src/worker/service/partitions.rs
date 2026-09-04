@@ -40,10 +40,6 @@ pub fn sync_partitions(
 
     for partition_id in 0..PARTITIONS_AMOUNT {
         let partition_id = PartitionId(partition_id as u16);
-        let partition_empty = runtime_store
-            .get_partition_records(&partition_id, 1, None)
-            .is_empty();
-
         let recipient_ids: HashSet<NodeId> = get_node_ids_curr_node_has_to_sync_the_partition_to(
             partition_id,
             &me.id,
@@ -55,21 +51,14 @@ pub fn sync_partitions(
         .cloned()
         .collect();
 
-        if !recipient_ids.is_empty() && partition_empty {
-            for recipient_id in recipient_ids {
-                record_completed_sync(state, output, me, partition_id, recipient_id);
-            }
-            state.sync.entry(partition_id).or_default();
-        } else {
-            sync_partition(
-                state,
-                output,
-                runtime_store,
-                me,
-                partition_id,
-                recipient_ids,
-            );
-        }
+        sync_partition(
+            state,
+            output,
+            runtime_store,
+            me,
+            partition_id,
+            recipient_ids,
+        );
     }
 
     remove_completed_syncs_and_obsolete_partitions(state, runtime_store, me);
@@ -116,7 +105,7 @@ fn sync_partition_to_recipient(
     recipient_id: &NodeId,
 ) -> bool {
     let Some(sync_state) = recipient_states.get_mut(recipient_id) else {
-        start_sync(
+        return start_sync(
             recipient_states,
             output,
             runtime_store,
@@ -124,7 +113,6 @@ fn sync_partition_to_recipient(
             partition_id,
             recipient_id,
         );
-        return false;
     };
 
     if sync_state.confirmed {
@@ -156,7 +144,11 @@ fn start_sync(
     me: &Me,
     partition_id: PartitionId,
     recipient_id: &NodeId,
-) {
+) -> bool {
+    let Some(start_revision) = runtime_store.stable_partition_revision(&partition_id) else {
+        return false;
+    };
+
     if let Some(curr_max_key) =
         sync_batch(output, runtime_store, recipient_id, &partition_id, None, me)
     {
@@ -165,10 +157,14 @@ fn start_sync(
             SyncState {
                 prev_max_key: None,
                 curr_max_key,
+                start_revision,
                 confirmed: false,
                 last_start_time: now_millis(),
             },
         );
+        false
+    } else {
+        runtime_store.stable_partition_revision(&partition_id) == Some(start_revision)
     }
 }
 
@@ -194,8 +190,49 @@ fn continue_confirmed_sync(
         sync_state.last_start_time = now_millis();
         false
     } else {
+        if runtime_store.stable_partition_revision(&partition_id) == Some(sync_state.start_revision)
+        {
+            sync_state.confirmed = true;
+            true
+        } else {
+            restart_changed_sync(
+                sync_state,
+                output,
+                runtime_store,
+                me,
+                partition_id,
+                recipient_id,
+            )
+        }
+    }
+}
+
+fn restart_changed_sync(
+    sync_state: &mut SyncState,
+    output: &mut Vec<WorkerProtocol>,
+    runtime_store: &RuntimeStore,
+    me: &Me,
+    partition_id: PartitionId,
+    recipient_id: &NodeId,
+) -> bool {
+    let Some(start_revision) = runtime_store.stable_partition_revision(&partition_id) else {
+        return false;
+    };
+
+    if let Some(curr_max_key) =
+        sync_batch(output, runtime_store, recipient_id, &partition_id, None, me)
+    {
+        sync_state.prev_max_key = None;
+        sync_state.curr_max_key = curr_max_key;
+        sync_state.start_revision = start_revision;
+        sync_state.confirmed = false;
+        sync_state.last_start_time = now_millis();
+        false
+    } else if runtime_store.stable_partition_revision(&partition_id) == Some(start_revision) {
         sync_state.confirmed = true;
         true
+    } else {
+        false
     }
 }
 
@@ -764,5 +801,90 @@ mod tests {
                 .iter()
                 .any(|message| matches!(message, WorkerProtocol::SyncBatch { .. }))
         );
+    }
+
+    #[test]
+    fn restarts_sync_when_a_new_key_would_fall_before_the_cursor() {
+        let current = node_id(1);
+        let new_replica = node_id(2);
+        let partitions = Partitions {
+            mapping: mapping(current.clone(), &[new_replica.clone()]),
+            old_replicas: HashMap::new(),
+            new_replicas: HashMap::from([(PARTITION, HashSet::from([new_replica.clone()]))]),
+        };
+        let mut state = state(
+            partitions,
+            cluster_nodes(&[current.clone(), new_replica.clone()]),
+        );
+        let me = me(current);
+        let store = RuntimeStore::new();
+        let partition_stride = PARTITIONS_AMOUNT as u64;
+
+        for index in 0..=1000 {
+            store.put(
+                Key(PARTITION.0 as u64 + index * 2 * partition_stride),
+                StoredRecord {
+                    value: vec![1],
+                    expiration_time_ms: 0,
+                    creation_time_ms: 1,
+                },
+            );
+        }
+
+        let inserted_behind_cursor = Key(PARTITION.0 as u64 + partition_stride);
+        let mut output = Vec::new();
+        sync_partitions(&mut state, &mut output, &store, &me);
+
+        let first_max_key = output
+            .iter()
+            .find_map(|message| match message {
+                WorkerProtocol::SyncBatch { request, .. } => {
+                    request.records.last().map(|record| record.key)
+                }
+                _ => None,
+            })
+            .expect("first batch");
+        store.put(
+            inserted_behind_cursor,
+            StoredRecord {
+                value: vec![2],
+                expiration_time_ms: 0,
+                creation_time_ms: 2,
+            },
+        );
+        handle_sync_batch_response(
+            &mut state,
+            HashMap::from([(PARTITION, first_max_key)]),
+            new_replica.clone(),
+        );
+
+        let mut transferred = false;
+        for _ in 0..6 {
+            output.clear();
+            sync_partitions(&mut state, &mut output, &store, &me);
+
+            let responses: Vec<_> = output
+                .iter()
+                .filter_map(|message| match message {
+                    WorkerProtocol::SyncBatch { request, .. } => {
+                        transferred |= request
+                            .records
+                            .iter()
+                            .any(|record| record.key == inserted_behind_cursor);
+                        request.records.last().map(|record| record.key)
+                    }
+                    _ => None,
+                })
+                .collect();
+            for max_key in responses {
+                handle_sync_batch_response(
+                    &mut state,
+                    HashMap::from([(PARTITION, max_key)]),
+                    new_replica.clone(),
+                );
+            }
+        }
+
+        assert!(transferred, "the behind-cursor insert must be resent");
     }
 }

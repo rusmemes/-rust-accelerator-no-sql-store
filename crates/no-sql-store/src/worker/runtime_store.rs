@@ -2,6 +2,7 @@ use crate::common::{PARTITIONS_AMOUNT, PartitionId, now_millis};
 use crossbeam_skiplist::SkipMap;
 use dashmap::DashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[derive(Debug, Clone)]
 pub struct Record {
@@ -12,13 +13,55 @@ pub struct Record {
 
 #[derive(Default, Clone)]
 pub struct RuntimeStore {
-    cache: Arc<DashMap<PartitionId, SkipMap<Key, Arc<Record>>>>,
+    cache: Arc<DashMap<PartitionId, PartitionStore>>,
+    next_revision: Arc<AtomicU64>,
+}
+
+#[derive(Default)]
+struct PartitionStore {
+    records: SkipMap<Key, Arc<Record>>,
+    active_writers: AtomicUsize,
+    revision: AtomicU64,
+}
+
+struct WriterGuard<'a> {
+    partition: &'a PartitionStore,
+    next_revision: &'a AtomicU64,
+}
+
+impl Drop for WriterGuard<'_> {
+    fn drop(&mut self) {
+        let revision = self.next_revision.fetch_add(1, Ordering::SeqCst) + 1;
+        self.partition.revision.store(revision, Ordering::SeqCst);
+        self.partition.active_writers.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl PartitionStore {
+    fn writer<'a>(&'a self, next_revision: &'a AtomicU64) -> WriterGuard<'a> {
+        self.active_writers.fetch_add(1, Ordering::SeqCst);
+        WriterGuard {
+            partition: self,
+            next_revision,
+        }
+    }
+
+    fn stable_revision(&self) -> Option<u64> {
+        let revision_before = self.revision.load(Ordering::SeqCst);
+        if self.active_writers.load(Ordering::SeqCst) != 0 {
+            return None;
+        }
+        let revision_after = self.revision.load(Ordering::SeqCst);
+        let writers_after = self.active_writers.load(Ordering::SeqCst);
+        (revision_before == revision_after && writers_after == 0).then_some(revision_after)
+    }
 }
 
 impl RuntimeStore {
     pub fn new() -> Self {
         Self {
             cache: Default::default(),
+            next_revision: Default::default(),
         }
     }
 }
@@ -43,6 +86,7 @@ impl RuntimeStore {
             Some(entry) => match after_key {
                 Some(after_key) => entry
                     .value()
+                    .records
                     .iter()
                     .skip_while(|entry| entry.key() <= after_key)
                     .take(amount)
@@ -50,6 +94,7 @@ impl RuntimeStore {
                     .collect(),
                 None => entry
                     .value()
+                    .records
                     .iter()
                     .take(amount)
                     .map(|entry| (*entry.key(), entry.value().clone()))
@@ -59,9 +104,17 @@ impl RuntimeStore {
         }
     }
 
+    /// Returns a revision only when no mutation of this partition is in flight.
+    pub fn stable_partition_revision(&self, partition: &PartitionId) -> Option<u64> {
+        match self.cache.get(partition) {
+            Some(entry) => entry.stable_revision(),
+            None => Some(0),
+        }
+    }
+
     pub fn remove_partition_if_empty(&self, partition: PartitionId) {
         if let dashmap::mapref::entry::Entry::Occupied(occupied) = self.cache.entry(partition)
-            && occupied.get().is_empty()
+            && occupied.get().records.is_empty()
         {
             occupied.remove();
         }
@@ -74,7 +127,8 @@ impl RuntimeStore {
     pub fn delete(&self, key: Key) {
         let partition = key.partition();
         let removed = if let Some(map) = self.cache.get(&partition) {
-            map.remove(&key).is_some()
+            let _writer = map.writer(&self.next_revision);
+            map.records.remove(&key).is_some()
         } else {
             false
         };
@@ -89,12 +143,13 @@ impl RuntimeStore {
 
         let mut needs_partition_cleanup = false;
         let res = if let Some(sorted_map) = self.cache.get(&partition) {
-            if let Some(entry) = sorted_map.get(&key) {
+            if let Some(entry) = sorted_map.records.get(&key) {
                 let record = entry.value();
                 let exp_time = record.expiration_time_ms;
                 if exp_time == 0 || exp_time > now_millis() {
                     Some(record.clone())
                 } else {
+                    let _writer = sorted_map.writer(&self.next_revision);
                     entry.remove();
                     needs_partition_cleanup = true;
                     None
@@ -115,10 +170,13 @@ impl RuntimeStore {
     pub fn put(&self, key: Key, record: Record) {
         let partition = key.partition();
         let sorted_map = self.cache.entry(partition).or_default();
+        let _writer = sorted_map.writer(&self.next_revision);
         let record = Arc::new(record);
-        sorted_map.compare_insert(key, record.clone(), |old| {
-            old.creation_time_ms <= record.creation_time_ms
-        });
+        sorted_map
+            .records
+            .compare_insert(key, record.clone(), |old| {
+                old.creation_time_ms <= record.creation_time_ms
+            });
     }
 
     /// Removes every record expired at or before `now_ms`.
@@ -132,9 +190,10 @@ impl RuntimeStore {
 
         for partition_id in partition_ids {
             if let Some(partition) = self.cache.get(&partition_id) {
-                for entry in partition.iter() {
+                for entry in partition.records.iter() {
                     let expiration_time_ms = entry.value().expiration_time_ms;
                     if expiration_time_ms != 0 && expiration_time_ms <= now_ms {
+                        let _writer = partition.writer(&self.next_revision);
                         entry.remove();
                         removed += 1;
                     }
@@ -395,19 +454,20 @@ mod tests {
             store
                 .cache
                 .get(&expired_one.partition())
-                .is_none_or(|partition| partition.get(&expired_one).is_none())
+                .is_none_or(|partition| partition.records.get(&expired_one).is_none())
         );
         assert!(
             store
                 .cache
                 .get(&expired_two.partition())
-                .is_none_or(|partition| partition.get(&expired_two).is_none())
+                .is_none_or(|partition| partition.records.get(&expired_two).is_none())
         );
         assert!(
             store
                 .cache
                 .get(&live.partition())
                 .unwrap()
+                .records
                 .get(&live)
                 .is_some()
         );
@@ -416,6 +476,7 @@ mod tests {
                 .cache
                 .get(&immortal.partition())
                 .unwrap()
+                .records
                 .get(&immortal)
                 .is_some()
         );
